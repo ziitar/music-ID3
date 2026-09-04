@@ -1,0 +1,25 @@
+appId: com.musicid3.desktop
+productName: Music ID3
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+asar: true
+asarUnpack:
+  - node_modules/node-taglib-sharp/**/*
+npmRebuild: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  artifactName: Music-ID3-Setup-${version}-${arch}.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+portable:
+  artifactName: Music-ID3-Portable-${version}-${arch}.${ext}

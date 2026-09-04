@@ -1,14 +1,12 @@
 {
   "name": "music-library-desktop",
+  "productName": "Music ID3",
   "version": "1.0.0",
-  "description": "",
+  "description": "Local Windows music metadata and CUE editor",
   "main": "dist/electron/main.js",
-  "directories": {
-    "doc": "docs",
-    "test": "tests"
-  },
   "scripts": {
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.node.json --watch\" \"wait-on http://127.0.0.1:5173 file:dist/electron/main.js && electron .\"",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:e2e": "playwright test",
@@ -16,12 +14,11 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "chardet": "1.6.0",
     "cue-parser": "0.3.0",
-    "electron": "^44.2.0",
     "fast-xml-parser": "^5.11.1",
     "iconv-lite": "^0.7.3",
     "node-taglib-sharp": "^6.0.3",
@@ -37,7 +34,9 @@
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",
+    "electron": "^44.2.0",
     "electron-builder": "^26.15.3",
+    "js-yaml": "^4.3.2",
     "jsdom": "^29.1.1",
     "playwright": "^1.62.1",
     "typescript": "^7.0.2",

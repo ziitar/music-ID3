@@ -1,0 +1,46 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Run unit and UI tests
+        run: npm test
+
+      - name: Run Electron E2E tests
+        run: npm run test:e2e
+
+      - name: Package Windows installer and portable app
+        run: npm run package:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: music-id3-windows-x64
+          if-no-files-found: error
+          path: |
+            release/Music-ID3-Setup-*-x64.exe
+            release/Music-ID3-Portable-*-x64.exe

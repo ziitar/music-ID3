@@ -1,5 +1,9 @@
 # Third-Party Notices
 
+Music ID3 itself is licensed under MIT. The entries below identify direct
+runtime components and the two upstream projects from which focused provider
+logic was extracted. Versions are those pinned by this application's lockfile.
+
 This application contains focused, modified adapter logic learned from the
 projects below. It does not vendor or run either project's HTTP server,
 framework, routing layer, global configuration, logging, proxy, login, playback,
@@ -59,6 +63,26 @@ stop working.
   `XMLValidator` and `XMLParser` with attributes enabled and entity processing
   disabled to classify CTDB response documents safely before reading the
   numeric `nentries` attribute.
+
+## Other Direct Runtime Components
+
+- `node-taglib-sharp` 6.0.3, LGPL-2.1-or-later,
+  https://github.com/benrr101/node-taglib-sharp. Used without local source
+  modification for tag and audio-property access. This version has no WavPack
+  metadata implementation; `.wv` files are scanned but cannot be read or
+  written through this component.
+- `cue-parser` 0.3.0, MIT,
+  https://github.com/justlaputa/cue-parser. Used without local source
+  modification to parse CUE structure behind the application's preservation
+  and validation wrapper.
+- `chardet` 1.6.0, MIT, https://github.com/runk/node-chardet. Used without
+  local source modification as one signal when detecting legacy CUE encodings.
+- `iconv-lite` 0.7.3, MIT, https://github.com/pillarjs/iconv-lite. Used without
+  local source modification to decode and encode supported CUE character sets.
+- React and React DOM 19.2.8, MIT, https://github.com/facebook/react. Used
+  without local source modification for the renderer user interface.
+- Electron 44.2.0, MIT, https://github.com/electron/electron. Used without
+  local source modification as the desktop runtime.
 
 ## MIT License Text
 
