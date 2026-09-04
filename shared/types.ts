@@ -58,6 +58,7 @@ export type CuePreservedLine = {
   fileIndex?: number;
   trackIndex?: number;
   order: number;
+  position: number;
 };
 
 export type CueDocument = {

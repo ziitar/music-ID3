@@ -118,26 +118,40 @@ function parserDocument(cue: ICueSheet, rawText: string): CueDocument {
 
   const preservedLines: CuePreservedLine[] = [];
   let fileIndex = -1;
-  let trackIndex = -1;
+  let activeTrackIndex: number | undefined;
+  let nextTrackIndex = 0;
+  let albumPosition = 0;
+  let filePosition = 0;
+  let trackPosition = 0;
   for (const [order, line] of rawText.split(/\r?\n/).entries()) {
     const command = cueCommand(line);
     if (command === "FILE") {
       fileIndex += 1;
-      trackIndex = -1;
+      activeTrackIndex = undefined;
+      filePosition = 0;
       continue;
     }
     if (command === "TRACK") {
-      trackIndex += 1;
+      activeTrackIndex = nextTrackIndex;
+      nextTrackIndex += 1;
+      trackPosition = 0;
       continue;
     }
     if (line.trim() !== "" && command && modeledCommands.has(command)) {
+      if (activeTrackIndex !== undefined) {
+        trackPosition += 1;
+      } else if (fileIndex >= 0) {
+        filePosition += 1;
+      } else {
+        albumPosition += 1;
+      }
       continue;
     }
     preservedLines.push(fileIndex < 0
-      ? { text: line, scope: "album", order }
-      : trackIndex < 0
-        ? { text: line, scope: "file", fileIndex, order }
-        : { text: line, scope: "track", fileIndex, trackIndex: tracks.findIndex((track) => track.fileIndex === fileIndex) + trackIndex, order });
+      ? { text: line, scope: "album", order, position: albumPosition }
+      : activeTrackIndex === undefined
+        ? { text: line, scope: "file", fileIndex, order, position: filePosition }
+        : { text: line, scope: "track", fileIndex, trackIndex: activeTrackIndex, order, position: trackPosition });
   }
   const unknownLines = preservedLines.filter((line) => line.text.trim() !== "").map((line) => line.text);
   const document: CueDocument = {
@@ -156,29 +170,27 @@ function parserDocument(cue: ICueSheet, rawText: string): CueDocument {
 }
 
 function validateRawTrackStructure(rawText: string): void {
-  let activeAudioTrack: { number: string; hasIndex01: boolean } | undefined;
+  let activeTrack: { number: string; hasIndex01: boolean } | undefined;
   const finishTrack = (): void => {
-    if (activeAudioTrack && !activeAudioTrack.hasIndex01) {
-      throw new Error(`TRACK ${activeAudioTrack.number} AUDIO requires INDEX 01`);
+    if (activeTrack && !activeTrack.hasIndex01) {
+      throw new Error(`TRACK ${activeTrack.number} requires INDEX 01`);
     }
-    activeAudioTrack = undefined;
+    activeTrack = undefined;
   };
 
   for (const line of rawText.split(/\r?\n/)) {
     const track = line.trim().match(/^TRACK\s+(\d+)\s+(\S+)/);
     if (track) {
       finishTrack();
-      if (track[2].toUpperCase() === "AUDIO") {
-        activeAudioTrack = { number: track[1], hasIndex01: false };
-      }
+      activeTrack = { number: track[1], hasIndex01: false };
       continue;
     }
     if (/^FILE(?:\s+|$)/.test(line.trim())) {
       finishTrack();
       continue;
     }
-    if (activeAudioTrack && /^INDEX\s+01(?:\s+|$)/.test(line.trim())) {
-      activeAudioTrack.hasIndex01 = true;
+    if (activeTrack && /^INDEX\s+01(?:\s+|$)/.test(line.trim())) {
+      activeTrack.hasIndex01 = true;
     }
   }
   finishTrack();
@@ -236,37 +248,50 @@ function quote(value: string): string {
 
 function canonicalCueText(document: CueDocument): string {
   const lines: string[] = [];
-  const preserved = (scope: CuePreservedLine["scope"], fileIndex?: number, trackIndex?: number): string[] => (
+  const preserved = (scope: CuePreservedLine["scope"], fileIndex?: number, trackIndex?: number): CuePreservedLine[] => (
     document.preservedLines ?? []
   )
     .filter((line) => line.scope === scope && line.fileIndex === fileIndex && line.trackIndex === trackIndex)
-    .sort((left, right) => left.order - right.order)
-    .map((line) => line.text);
-  lines.push(...preserved("album"));
+    .sort((left, right) => left.order - right.order);
+  const interleave = (structured: string[], retained: CuePreservedLine[]): string[] => {
+    const result: string[] = [];
+    for (let position = 0; position <= structured.length; position += 1) {
+      result.push(...retained
+        .filter((line) => Math.min(line.position, structured.length) === position)
+        .map((line) => line.text));
+      if (position < structured.length) {
+        result.push(structured[position]);
+      }
+    }
+    return result;
+  };
+  const albumLines: string[] = [];
   for (const remark of document.remarks) {
-    lines.push(`REM ${remark}`);
+    albumLines.push(`REM ${remark}`);
   }
-  if (document.songwriter) lines.push(`SONGWRITER ${quote(document.songwriter)}`);
-  if (document.performer) lines.push(`PERFORMER ${quote(document.performer)}`);
-  if (document.title) lines.push(`TITLE ${quote(document.title)}`);
+  if (document.songwriter) albumLines.push(`SONGWRITER ${quote(document.songwriter)}`);
+  if (document.performer) albumLines.push(`PERFORMER ${quote(document.performer)}`);
+  if (document.title) albumLines.push(`TITLE ${quote(document.title)}`);
+  lines.push(...interleave(albumLines, preserved("album")));
 
   for (const [fileIndex, file] of document.files.entries()) {
     lines.push(`FILE ${quote(file.path)} ${file.type ?? "WAVE"}`);
-    lines.push(...preserved("file", fileIndex));
+    lines.push(...interleave([], preserved("file", fileIndex)));
     for (const [trackIndex, track] of document.tracks.entries()) {
       if ((track.fileIndex ?? 0) !== fileIndex) {
         continue;
       }
       lines.push(`  TRACK ${String(track.number).padStart(2, "0")} ${track.type ?? "AUDIO"}`);
-      if (track.title) lines.push(`    TITLE ${quote(track.title)}`);
-      if (track.performer) lines.push(`    PERFORMER ${quote(track.performer)}`);
-      if (track.songwriter) lines.push(`    SONGWRITER ${quote(track.songwriter)}`);
-      lines.push(...preserved("track", fileIndex, trackIndex));
-      if (track.pregap) lines.push(`    PREGAP ${track.pregap}`);
+      const trackLines: string[] = [];
+      if (track.title) trackLines.push(`    TITLE ${quote(track.title)}`);
+      if (track.performer) trackLines.push(`    PERFORMER ${quote(track.performer)}`);
+      if (track.songwriter) trackLines.push(`    SONGWRITER ${quote(track.songwriter)}`);
+      if (track.pregap) trackLines.push(`    PREGAP ${track.pregap}`);
       for (const index of track.indexes) {
-        lines.push(`    INDEX ${String(index.number).padStart(2, "0")} ${index.time}`);
+        trackLines.push(`    INDEX ${String(index.number).padStart(2, "0")} ${index.time}`);
       }
-      if (track.postgap) lines.push(`    POSTGAP ${track.postgap}`);
+      if (track.postgap) trackLines.push(`    POSTGAP ${track.postgap}`);
+      lines.push(...interleave(trackLines, preserved("track", fileIndex, trackIndex)));
     }
   }
   if (!document.preservedLines) {
@@ -300,8 +325,8 @@ export function validateCueDocument(document: CueDocument): void {
       throw new Error("CUE TRACK numbers must be sequential starting at 1");
     }
     const fileIndex = track.fileIndex ?? 0;
-    if (!document.files[fileIndex]) {
-      throw new Error(`TRACK ${track.number} references an invalid FILE block`);
+    if (!Number.isInteger(fileIndex) || fileIndex < 0 || fileIndex >= document.files.length) {
+      throw new Error(`TRACK ${track.number} FILE index must be an integer in range`);
     }
     if (fileIndex < previousFileIndex) {
       throw new Error("TRACK FILE indices must be nondecreasing");
@@ -331,26 +356,42 @@ export function validateCueDocument(document: CueDocument): void {
     if (!Number.isInteger(line.order) || line.order < 0) {
       throw new Error("Preserved CUE lines require a non-negative order");
     }
+    if (!Number.isInteger(line.position) || line.position < 0) {
+      throw new Error("Preserved CUE lines require a non-negative position anchor");
+    }
     const command = cueCommand(line.text);
     if (command && modeledCommands.has(command)) {
       throw new Error(`Structured directive ${command} cannot be stored as a preserved line`);
+    }
+    if (line.scope !== "album" && line.scope !== "file" && line.scope !== "track") {
+      throw new Error("Invalid preserved-line anchor scope");
     }
     if (line.scope === "album") {
       if (line.fileIndex !== undefined || line.trackIndex !== undefined) {
         throw new Error("Album-scoped preserved lines cannot reference a FILE or TRACK");
       }
     } else if (line.scope === "file") {
-      if (line.fileIndex === undefined || !document.files[line.fileIndex] || line.trackIndex !== undefined) {
-        throw new Error("File-scoped preserved line has an invalid FILE index");
+      if (
+        typeof line.fileIndex !== "number"
+        || !Number.isInteger(line.fileIndex)
+        || line.fileIndex < 0
+        || line.fileIndex >= document.files.length
+        || line.trackIndex !== undefined
+      ) {
+        throw new Error("Invalid preserved-line anchor for FILE scope");
       }
     } else if (
-      line.fileIndex === undefined
-      || line.trackIndex === undefined
-      || !document.files[line.fileIndex]
-      || !document.tracks[line.trackIndex]
+      typeof line.fileIndex !== "number"
+      || typeof line.trackIndex !== "number"
+      || !Number.isInteger(line.fileIndex)
+      || !Number.isInteger(line.trackIndex)
+      || line.fileIndex < 0
+      || line.fileIndex >= document.files.length
+      || line.trackIndex < 0
+      || line.trackIndex >= document.tracks.length
       || (document.tracks[line.trackIndex].fileIndex ?? 0) !== line.fileIndex
     ) {
-      throw new Error("Track-scoped preserved line has an invalid anchor");
+      throw new Error("Invalid preserved-line anchor for TRACK scope");
     }
   }
 }

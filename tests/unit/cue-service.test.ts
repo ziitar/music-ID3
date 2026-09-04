@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -105,6 +105,29 @@ describe("CUE service", () => {
       rawText,
       encoding: "utf8"
     });
+
+    expect(state.parseError).toMatch(/TRACK 02.*INDEX 01/i);
+    expect(saved).toEqual({ ok: false, error: expect.stringMatching(/TRACK 02.*INDEX 01/i) });
+  });
+
+  it("rejects a trailing data track without INDEX 01 when parsing and saving raw text", async () => {
+    const rawText = [
+      'FILE "disc.bin" BINARY',
+      "  TRACK 01 MODE1/2352",
+      "    INDEX 01 00:00:00",
+      "  TRACK 02 MODE1/2352"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Disc/disc.cue");
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "disc.cue");
+    const submitted: CueDocument = {
+      remarks: [],
+      files: [{ path: "disc.bin", type: "BINARY" }],
+      tracks: [{ number: 1, type: "MODE1/2352", fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+
+    const saved = await createCueService().saveCue({ path: cuePath, document: submitted, rawText, encoding: "utf8" });
 
     expect(state.parseError).toMatch(/TRACK 02.*INDEX 01/i);
     expect(saved).toEqual({ ok: false, error: expect.stringMatching(/TRACK 02.*INDEX 01/i) });
@@ -232,6 +255,73 @@ describe("CUE service", () => {
     expect(lines.indexOf("    ; track one comment")).toBeLessThan(track2);
   });
 
+  it("interleaves preserved lines at their original positions within every scope", () => {
+    const rawText = [
+      "; before album title",
+      'TITLE "Album"',
+      "X-ALBUM-AFTER after-title",
+      'FILE "disc-one.flac" WAVE',
+      "  ; file-one comment",
+      "  TRACK 01 AUDIO",
+      '    TITLE "Before"',
+      "    X-BEFORE-PREGAP retained",
+      "    PREGAP 00:00:10",
+      "    INDEX 00 00:00:00",
+      "    INDEX 01 00:00:10",
+      "",
+      "    X-AFTER-INDEX retained",
+      "    POSTGAP 00:00:05",
+      "    ; after postgap",
+      "  TRACK 02 AUDIO",
+      '    TITLE "Two"',
+      "    INDEX 01 03:00:00",
+      "    ; track-two tail",
+      'FILE "disc-two.flac" WAVE',
+      "  ; file-two comment",
+      "  TRACK 03 AUDIO",
+      '    TITLE "Three"',
+      "    INDEX 01 00:00:00"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/ordered.cue");
+    state.parsed.tracks[0].title = "After";
+    const expected = rawText.replace('TITLE "Before"', 'TITLE "After"');
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe(expected);
+  });
+
+  it.each(["1" as unknown as number, Number.NaN, -1, 0.5])(
+    "rejects renderer-shaped invalid preserved-line position %s",
+    (position) => {
+      const document: CueDocument = {
+        title: "Album",
+        remarks: [],
+        files: [{ path: "disc.flac" }],
+        tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+        unknownLines: ["; comment"],
+        preservedLines: [{ text: "; comment", scope: "album", order: 0, position }]
+      };
+
+      expect(() => serializeCue(document, "utf8")).toThrow(/non-negative position anchor/i);
+    }
+  );
+
+  it.each([
+    { text: "; comment", scope: "unexpected", order: 0, position: 0 },
+    { text: "; comment", scope: "file", fileIndex: "0", order: 0, position: 0 },
+    { text: "; comment", scope: "track", fileIndex: 0, trackIndex: "0", order: 0, position: 0 }
+  ])("rejects an untrusted preserved-line anchor %#", (preservedLine) => {
+    const document: CueDocument = {
+      title: "Album",
+      remarks: [],
+      files: [{ path: "disc.flac" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: ["; comment"],
+      preservedLines: [preservedLine as unknown as NonNullable<CueDocument["preservedLines"]>[number]]
+    };
+
+    expect(() => serializeCue(document, "utf8")).toThrow(/invalid preserved-line anchor/i);
+  });
+
   it("rejects decreasing FILE indices that would reorder sequential tracks", () => {
     const document: CueDocument = {
       remarks: [],
@@ -244,6 +334,23 @@ describe("CUE service", () => {
     };
 
     expect(() => serializeCue(document, "utf8")).toThrow(/FILE indices.*nondecreasing/i);
+  });
+
+  it.each([
+    "0" as unknown as number,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    0.5,
+    -1
+  ])("rejects renderer-shaped invalid FILE index %s", (fileIndex) => {
+    const document: CueDocument = {
+      remarks: [],
+      files: [{ path: "disc.flac" }],
+      tracks: [{ number: 1, fileIndex, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+
+    expect(() => serializeCue(document, "utf8")).toThrow(/FILE index must be an integer in range/i);
   });
 
   it("reads bytes before parsing and reports resolved missing FILE references", async () => {
@@ -373,5 +480,37 @@ describe("CUE service", () => {
 
     expect(result).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
     expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("restores the original and preserves the prior backup when backup publication fails", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "album.cue");
+    const backupPath = `${cuePath}.bak`;
+    const original = 'TITLE "Current"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const priorBackup = 'TITLE "Prior backup"';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    await writeFile(backupPath, priorBackup);
+    const service = createCueService({
+      rename: async (source, destination) => {
+        if (destination === backupPath) {
+          throw new Error("backup publish denied");
+        }
+        await rename(source, destination);
+      }
+    });
+
+    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8" });
+
+    expect(result).toEqual({ ok: false, error: "backup publish denied" });
+    expect(await readFile(cuePath, "utf8")).toBe(original);
+    expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
+    expect((await readdir(directory)).sort()).toEqual(["album.cue", "album.cue.bak"]);
   });
 });
