@@ -55,6 +55,17 @@ describe("audio format helpers", () => {
 });
 
 describe("library scanner", () => {
+  it("stops reading and emitting when its abort signal is cancelled", async () => {
+    const controller = new AbortController();
+    const emitted: string[] = [];
+    const scanner = createLibraryScanner({
+      readdir: async () => [{ name: "one.flac", isDirectory: () => false, isFile: () => true }, { name: "two.flac", isDirectory: () => false, isFile: () => true }] as never,
+      readAudioMetadata: async (filePath) => { controller.abort(); return { common: {}, raw: {}, durationMs: filePath.includes("one") ? 1 : 2 }; },
+      stat: async () => ({ size: 1 }) as never
+    });
+    await scanner.scanDirectory("D:/Music", (item) => emitted.push(item.path), controller.signal);
+    expect(emitted.length).toBeLessThanOrEqual(1);
+  });
   it("recursively finds mixed-case audio and associates CUE FILE references case-insensitively", async () => {
     const root = await createTempDir();
     const discDirectory = path.join(root, "Disc One");

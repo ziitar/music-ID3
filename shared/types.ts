@@ -145,6 +145,13 @@ export type ScanStarted = {
   scanId: string;
 };
 
+export type BuildCandidateCueInput = {
+  audioPath: string;
+  candidate: MetadataCandidate;
+};
+
+export type CookieStatus = "configured" | "unconfigured";
+
 export type WriteResult =
   | { ok: true; metadata: AudioMetadata }
   | { ok: false; error: string; unsupportedFields?: Array<keyof CommonMetadata> };

@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { OpenDialogOptions } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { CookieSource, CueEncoding, MetadataPatch, SaveCueInput, ScanProgress } from "../../shared/types";
+import type { BuildCandidateCueInput, CookieSource, CueEncoding, MetadataCandidate, MetadataPatch, SaveCueInput, ScanProgress } from "../../shared/types";
 import type { MetadataSource } from "../../shared/types";
 import type { CookieStore } from "../services/cookie-store";
 import type { MetadataAdapter } from "../services/metadata/adapter";
 import { scanDirectory } from "../services/library-scanner";
 import { readAudioMetadata, writeAudioMetadata } from "../services/tag-service";
-import { readCue, saveCue } from "../services/cue-service";
+import { parseCue, readCue, saveCue } from "../services/cue-service";
+import { buildCandidateCue } from "../services/cue-candidate";
 
 type IpcMainLike = {
   handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
@@ -19,6 +20,7 @@ type RegisterIpcHandlersOptions = {
   cookieStore: Pick<CookieStore, "set" | "redacted">;
   metadataAdapters?: Partial<Record<MetadataSource, MetadataAdapter>>;
   clearOnlineCache?: () => void;
+  scanLibrary?: typeof scanDirectory;
 };
 
 function asString(value: unknown, name: string): string {
@@ -86,8 +88,10 @@ export function registerIpcHandlers({
   showOpenDialog,
   cookieStore,
   metadataAdapters = {},
-  clearOnlineCache = () => undefined
+  clearOnlineCache = () => undefined,
+  scanLibrary = scanDirectory
 }: RegisterIpcHandlersOptions): void {
+  const scans = new Map<string, AbortController>();
   ipcMain.handle(ipcChannels.selectDirectory, async () => {
     const result = await showOpenDialog({ properties: ["openDirectory"] });
     return result.canceled ? undefined : result.filePaths[0];
@@ -97,23 +101,32 @@ export function registerIpcHandlers({
     const root = asString(directoryPath, "path");
     const scanId = randomUUID();
     let scannedCount = 0;
-    void scanDirectory(root, (item) => {
+    const controller = new AbortController();
+    scans.set(scanId, controller);
+    void scanLibrary(root, (item) => {
+      if (controller.signal.aborted) return;
       scannedCount += 1;
       publishScanProgress(event, { scanId, item, scannedCount, phase: "scanning" });
-    }).then((summary) => {
+    }, controller.signal).then((summary) => {
+      if (controller.signal.aborted) return;
       for (const scanError of summary.errors) {
         publishScanProgress(event, { scanId, scannedCount, phase: "error", error: `${scanError.path}: ${scanError.error}` });
       }
       publishScanProgress(event, { scanId, scannedCount, totalCount: summary.items.length, phase: "complete" });
     }).catch((error) => {
+      if (controller.signal.aborted) return;
       publishScanProgress(event, {
         scanId,
         scannedCount,
         phase: "error",
         error: error instanceof Error ? error.message : String(error)
       });
-    });
+    }).finally(() => scans.delete(scanId));
     return { ok: true, scanId };
+  });
+
+  ipcMain.handle(ipcChannels.cancelScan, (_event, scanId) => {
+    scans.get(asString(scanId, "scanId"))?.abort();
   });
 
   ipcMain.handle(ipcChannels.readAudio, (_event, audioPath) => {
@@ -130,11 +143,30 @@ export function registerIpcHandlers({
 
   ipcMain.handle(ipcChannels.saveCue, (_event, input) => saveCue(asSaveCueInput(input)));
 
+  ipcMain.handle(ipcChannels.previewCue, (_event, cuePath, rawText) => parseCue(asString(rawText, "rawText"), asString(cuePath, "path")));
+
+  ipcMain.handle(ipcChannels.buildCandidateCue, (_event, value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Candidate CUE input must be an object");
+    const input = value as Partial<BuildCandidateCueInput>;
+    const candidate = input.candidate as MetadataCandidate | undefined;
+    if (!candidate || candidate.source !== "musicbrainz" || !candidate.tracks || !candidate.offsets) throw new TypeError("MusicBrainz candidate requires tracks and offsets");
+    return buildCandidateCue({ audioPath: asString(input.audioPath, "audioPath"), album: candidate.album ?? candidate.title, performer: candidate.artist, date: candidate.date, offsets: candidate.offsets, tracks: candidate.tracks.map((track) => ({ title: track.title, performer: track.artist })), fileType: "WAVE" });
+  });
+
   ipcMain.handle(ipcChannels.searchMetadata, (_event, source, query) => {
     const metadataSource = asMetadataSource(source);
     const adapter = metadataAdapters[metadataSource];
     if (!adapter) throw new Error(`Metadata source ${metadataSource} is not configured`);
     return adapter.search(asString(query, "query"));
+  });
+
+  ipcMain.handle(ipcChannels.getMetadataCandidate, async (_event, source, id) => {
+    const metadataSource = asMetadataSource(source);
+    const adapter = metadataAdapters[metadataSource];
+    if (!adapter) throw new Error(`Metadata source ${metadataSource} is not configured`);
+    const candidate = await adapter.getDetails(asString(id, "id"));
+    const cover = await adapter.getCover(candidate);
+    return { ...candidate, ...(cover ? { cover } : {}) };
   });
 
   ipcMain.handle(ipcChannels.setProviderCookie, async (_event, source, value) => {
@@ -156,6 +188,8 @@ export function registerIpcHandlers({
       return { ok: false, error: "Provider connectivity check failed" };
     }
   });
+
+  ipcMain.handle(ipcChannels.getProviderCookieStatus, (_event, source) => cookieStore.redacted(asCookieSource(source)));
 
   ipcMain.handle(ipcChannels.clearOnlineCache, async () => {
     clearOnlineCache();

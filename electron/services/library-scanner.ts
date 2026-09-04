@@ -36,13 +36,15 @@ function errorMessage(error: unknown): string {
 async function walkDirectory(
   root: string,
   dependencies: LibraryScannerDependencies,
-  errors: ScanSummary["errors"]
+  errors: ScanSummary["errors"],
+  signal?: AbortSignal
 ): Promise<ScannedPaths> {
   const files: string[] = [];
   const audio: string[] = [];
   const cue: string[] = [];
 
   async function visit(directory: string): Promise<void> {
+    if (signal?.aborted) return;
     let entries: Dirent[];
     try {
       entries = await dependencies.readdir(directory, { withFileTypes: true });
@@ -52,6 +54,7 @@ async function walkDirectory(
     }
     entries.sort((left, right) => left.name.localeCompare(right.name, "en", { sensitivity: "base" }));
     for (const entry of entries) {
+      if (signal?.aborted) return;
       const entryPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(entryPath);
@@ -79,13 +82,14 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
     ...overrides
   };
 
-  async function scanDirectory(root: string, onItem: (item: LibraryItem) => void): Promise<ScanSummary> {
+  async function scanDirectory(root: string, onItem: (item: LibraryItem) => void, signal?: AbortSignal): Promise<ScanSummary> {
     const errors: ScanSummary["errors"] = [];
-    const scanned = await walkDirectory(root, dependencies, errors);
+    const scanned = await walkDirectory(root, dependencies, errors, signal);
     const cueItems: LibraryItem[] = [];
     const cueByReferencedAudio = new Map<string, string>();
 
     for (const cuePath of scanned.cue) {
+      if (signal?.aborted) break;
       try {
         const cueState = await dependencies.readCue(cuePath);
         const { referencedFiles, missingReferencedFiles } = await resolveCueFileReferences(
@@ -106,7 +110,7 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
           errors.push({ path: cuePath, error: cueState.parseError });
         }
         cueItems.push(cueItem);
-        onItem(cueItem);
+        if (!signal?.aborted) onItem(cueItem);
       } catch (error) {
         errors.push({ path: cuePath, error: errorMessage(error) });
         const cueItem: LibraryItem = {
@@ -120,12 +124,13 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
           parseError: errorMessage(error)
         };
         cueItems.push(cueItem);
-        onItem(cueItem);
+        if (!signal?.aborted) onItem(cueItem);
       }
     }
 
     const audioItems: LibraryItem[] = [];
-    await Promise.all(scanned.audio.map(async (audioPath): Promise<void> => {
+    for (const audioPath of scanned.audio) {
+      if (signal?.aborted) break;
       let metadata: AudioMetadata;
       try {
         metadata = await dependencies.readAudioMetadata(audioPath);
@@ -165,9 +170,11 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
         cuePath,
         wholeTrackStatus: wholeTrackStatus(metadata.durationMs, Boolean(cuePath))
       };
-      audioItems.push(audioItem);
-      onItem(audioItem);
-    }));
+      if (!signal?.aborted) {
+        audioItems.push(audioItem);
+        onItem(audioItem);
+      }
+    }
 
     return { items: [...audioItems, ...cueItems].sort((left, right) => comparePaths(left.path, right.path)), errors };
   }

@@ -23,13 +23,18 @@ describe("IPC contracts", () => {
     expect(ipcChannels).toEqual({
       selectDirectory: "music-id3:select-directory",
       scanDirectory: "music-id3:scan-directory",
+      cancelScan: "music-id3:cancel-scan",
       readAudio: "music-id3:read-audio",
       writeAudio: "music-id3:write-audio",
       readCue: "music-id3:read-cue",
       saveCue: "music-id3:save-cue",
+      previewCue: "music-id3:preview-cue",
+      buildCandidateCue: "music-id3:build-candidate-cue",
       searchMetadata: "music-id3:search-metadata",
+      getMetadataCandidate: "music-id3:get-metadata-candidate",
       setProviderCookie: "music-id3:set-provider-cookie",
       testProviderCookie: "music-id3:test-provider-cookie",
+      getProviderCookieStatus: "music-id3:get-provider-cookie-status",
       clearOnlineCache: "music-id3:clear-online-cache",
       scanProgress: "music-id3:scan-progress"
     });
@@ -59,16 +64,63 @@ describe("IPC contracts", () => {
     expect(registered).toEqual([
       ipcChannels.selectDirectory,
       ipcChannels.scanDirectory,
+      ipcChannels.cancelScan,
       ipcChannels.readAudio,
       ipcChannels.writeAudio,
       ipcChannels.readCue,
       ipcChannels.saveCue,
+      ipcChannels.previewCue,
+      ipcChannels.buildCandidateCue,
       ipcChannels.searchMetadata,
+      ipcChannels.getMetadataCandidate,
       ipcChannels.setProviderCookie,
       ipcChannels.testProviderCookie,
+      ipcChannels.getProviderCookieStatus,
       ipcChannels.clearOnlineCache
     ]);
     expect(registered).not.toContain(ipcChannels.scanProgress);
+  });
+
+  it("returns only redacted Cookie configuration status", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "configured" }
+    });
+    await expect(handlers.get(ipcChannels.getProviderCookieStatus)?.({}, "netease")).resolves.toBe("configured");
+  });
+
+  it("previews raw CUE and builds a MusicBrainz candidate document", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" } });
+    const preview = await handlers.get(ipcChannels.previewCue)?.({}, "D:/Music/disc.cue", 'TITLE "Edited"\nFILE "disc.flac" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00');
+    expect(preview).toMatchObject({ parsed: { title: "Edited" } });
+    expect((preview as { parseError?: string }).parseError).toBeUndefined();
+    const built = await handlers.get(ipcChannels.buildCandidateCue)?.({}, { audioPath: "D:/Music/disc.flac", candidate: { id: "mb", source: "musicbrainz", title: "Release", artist: "Artist", offsets: [150, 7650], tracks: [{ number: 1, title: "One" }, { number: 2, title: "Two" }], confidence: "high" } });
+    expect(built).toMatchObject({ title: "Release", performer: "Artist", files: [{ path: "disc.flac" }], tracks: [{ title: "One" }, { title: "Two" }] });
+  });
+
+  it("loads selected candidate details and cover art", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const details = { id: "release", source: "musicbrainz" as const, title: "Release", tracks: [{ number: 1, title: "One" }], offsets: [150], confidence: "high" as const };
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      metadataAdapters: {
+        musicbrainz: {
+          search: async () => [],
+          getDetails: async () => details,
+          getCover: async () => ({ mimeType: "image/jpeg", data: "AQID" })
+        }
+      }
+    });
+
+    await expect(handlers.get(ipcChannels.getMetadataCandidate)?.({}, "musicbrainz", "release")).resolves.toEqual({
+      ...details,
+      cover: { mimeType: "image/jpeg", data: "AQID" }
+    });
   });
 
   it("starts a scan and publishes typed progress only to the invoking renderer", async () => {
@@ -103,6 +155,19 @@ describe("IPC contracts", () => {
     expect(progress).toEqual([
       expect.objectContaining({ phase: "complete", scannedCount: 0, scanId: (started as { scanId: string }).scanId })
     ]);
+  });
+
+  it("aborts the matching main-process scan without publishing completion", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    let signal: AbortSignal | undefined;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const progress: unknown[] = [];
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
+    const started = await handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: (_channel: string, payload: unknown) => progress.push(payload) } }, "D:/Music") as { scanId: string };
+    await handlers.get(ipcChannels.cancelScan)?.({}, started.scanId);
+    expect(signal?.aborted).toBe(true); release(); await Promise.resolve(); await Promise.resolve();
+    expect(progress).toEqual([]);
   });
 
   it("reads and saves CUE files through the concrete allow-listed handlers", async () => {

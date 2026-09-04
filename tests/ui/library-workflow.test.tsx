@@ -19,11 +19,16 @@ describe("library editing workflow", () => {
     window.musicId3 = {
       selectDirectory: vi.fn(async () => "D:/音乐"),
       scanDirectory: vi.fn(async () => ({ ok: true, scanId: "scan-1" })),
+      cancelScan: vi.fn(async () => undefined),
       readAudio: vi.fn(async () => audioItem().metadata),
       writeAudio: vi.fn(async (_path, patch) => ({ ok: true, metadata: { ...audioItem().metadata, common: { ...audioItem().metadata.common, ...patch.fields } } })),
       readCue: vi.fn(), saveCue: vi.fn(async () => ({ ok: true, path: "D:/音乐/album.cue", backupPath: "D:/音乐/album.cue.bak" })),
+      previewCue: vi.fn(async (path, rawText) => ({ path, rawText, encoding: "utf8", parsed: { title: rawText.includes("Edited") ? "Edited" : "Album", remarks: [], files: [{ path: "disc.flac" }], tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] })),
+      buildCandidateCue: vi.fn(async () => ({ title: "Candidate release", performer: "Artist", remarks: [], files: [{ path: "track.flac" }], tracks: [{ number: 1, title: "First", indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] })),
       searchMetadata: vi.fn(async () => [{ id: "mb-1", source: "musicbrainz", title: "New title", artist: "Artist", confidence: "high" }]),
+      getMetadataCandidate: vi.fn(async (_source, id) => ({ id, source: "musicbrainz", title: "New title", artist: "Artist", confidence: "high", cover: { mimeType: "image/jpeg", data: "AQID" } })),
       setProviderCookie: vi.fn(async () => undefined), testProviderCookie: vi.fn(async () => ({ ok: true, status: "configured" })),
+      getProviderCookieStatus: vi.fn(async () => "unconfigured"),
       clearOnlineCache: vi.fn(async () => undefined),
       onScanProgress: vi.fn((listener) => { progressListener = listener; return () => { progressListener = undefined; }; })
     };
@@ -51,6 +56,16 @@ describe("library editing workflow", () => {
     expect(screen.getByText(/whole-track cue candidate/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /use normal audio editing/i }));
     expect(screen.queryByText(/whole-track cue candidate/i)).not.toBeInTheDocument();
+  });
+
+  it("clears stale editor details when a new scan begins", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac")); expect(screen.getByLabelText(/title value/i)).toHaveValue("Old title");
+
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+
+    expect(screen.getByText(/select a file to inspect/i)).toBeInTheDocument();
   });
 
   it("previews selected field diff and requires confirmation before audio write", async () => {
@@ -81,5 +96,65 @@ describe("library editing workflow", () => {
     expect(screen.getByText(/\.bak/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalled());
+  });
+
+  it("applies selected candidate fields and refreshes after confirmed write", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    expect(await screen.findByText("New title")).toBeInTheDocument(); fireEvent.click(screen.getByRole("button", { name: /apply candidate/i }));
+    await screen.findByRole("button", { name: /confirm candidate write/i }); expect(screen.getAllByText(/old title/i).length).toBeGreaterThan(0); fireEvent.click(screen.getByRole("button", { name: /confirm candidate write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: expect.objectContaining({ title: "New title", artist: "Artist" }), selectedFields: expect.arrayContaining(["title", "artist"]) })));
+    expect(window.musicId3.readAudio).toHaveBeenCalledWith("D:/音乐/track.flac");
+    await waitFor(() => expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument());
+  });
+
+  it("keeps candidate confirmation open and does not refresh after a rejected write", async () => {
+    vi.mocked(window.musicId3.writeAudio).mockResolvedValue({ ok: false, error: "Write rejected" });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
+
+    expect(await screen.findByText("Write rejected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /confirm candidate write/i })).toBeInTheDocument();
+    expect(window.musicId3.readAudio).not.toHaveBeenCalled();
+  });
+
+  it("includes replacement and removal CoverArt in audio write payloads", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac"));
+    const file = new File([new Uint8Array([1, 2, 3])], "cover.png", { type: "image/png" }); fireEvent.change(screen.getByLabelText(/cover file/i), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByText(/image\/png/i)).toBeInTheDocument()); fireEvent.click(screen.getByRole("button", { name: /preview diff/i })); fireEvent.click(screen.getByRole("button", { name: /write selected fields/i })); fireEvent.click(screen.getByRole("button", { name: /confirm write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenLastCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: { cover: { mimeType: "image/png", data: "AQID" } }, selectedFields: ["cover"] })));
+    fireEvent.click(screen.getByRole("button", { name: /remove cover/i })); fireEvent.click(screen.getByRole("button", { name: /confirm clear/i })); fireEvent.click(screen.getByRole("button", { name: /preview diff/i })); fireEvent.click(screen.getByRole("button", { name: /write selected fields/i })); fireEvent.click(screen.getByRole("button", { name: /confirm write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenLastCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: { cover: undefined }, selectedFields: ["cover"] })));
+  });
+
+  it("parses raw CUE edits and saves the validated document with selected encoding", async () => {
+    render(<App />); const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "gb18030", rawText: 'TITLE "Album"', parsed: { title: "Album", remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [], candidateEncodings: ["utf8", "gb18030"] }; fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /^raw$/i })); fireEvent.change(screen.getByLabelText(/raw cue/i), { target: { value: 'TITLE "Edited"\nFILE "disc.flac" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00' } }); fireEvent.blur(screen.getByLabelText(/raw cue/i)); await waitFor(() => expect(window.musicId3.previewCue).toHaveBeenCalled()); fireEvent.change(screen.getByLabelText(/encoding/i), { target: { value: "utf8" } }); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
+    await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ encoding: "utf8", document: expect.objectContaining({ title: "Edited" }) })));
+  });
+
+  it("mutates structured CUE fields in the saved document", async () => {
+    render(<App />); const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: 'TITLE "Album"', parsed: { title: "Album", remarks: [], files: [{ path: "old.flac" }], tracks: [{ number: 1, title: "Old track", indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] }; fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.change(screen.getByLabelText(/cue album title/i), { target: { value: "Edited album" } }); fireEvent.change(screen.getByLabelText(/cue file 1/i), { target: { value: "new.flac" } }); fireEvent.change(screen.getByLabelText(/track 1 title/i), { target: { value: "Edited track" } }); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
+    await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ rawText: "", document: expect.objectContaining({ title: "Edited album", files: [expect.objectContaining({ path: "new.flac" })], tracks: [expect.objectContaining({ title: "Edited track" })] }) })));
+  });
+
+  it("opens a MusicBrainz release as a CUE draft for a suspected whole-track", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", trackCount: 1, confidence: "low" }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", offsets: [150], tracks: [{ number: 1, title: "First" }], confidence: "high", cover: { mimeType: "image/jpeg", data: "AQID" } });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); await screen.findByText("Candidate release"); fireEvent.click(screen.getByRole("button", { name: /apply candidate/i }));
+    expect(await screen.findByDisplayValue("Candidate release")).toBeInTheDocument(); expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledWith("musicbrainz", "release"); expect(window.musicId3.buildCandidateCue).toHaveBeenCalledWith(expect.objectContaining({ audioPath: "D:/音乐/track.flac", candidate: expect.objectContaining({ offsets: [150] }) })); expect(screen.getByText(/musicbrainz release/i)).toBeInTheDocument(); expect(screen.getByAltText("candidate cover")).toBeInTheDocument();
+  });
+
+  it("blocks invalid raw CUE saves and shows validation errors", async () => {
+    vi.mocked(window.musicId3.previewCue).mockResolvedValue({ path: "D:/音乐/album.cue", encoding: "utf8", rawText: "BROKEN", parsed: { remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [], parseError: "Missing TRACK" });
+    render(<App />); const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: "", parsed: { remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] }; fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /^raw$/i })); fireEvent.change(screen.getByLabelText(/raw cue/i), { target: { value: "BROKEN" } }); fireEvent.blur(screen.getByLabelText(/raw cue/i)); expect(await screen.findByText("Missing TRACK")).toBeInTheDocument(); expect(screen.getByRole("button", { name: /save cue/i })).toBeDisabled();
+  });
+
+  it("loads redacted Cookie status and displays search and cache errors", async () => {
+    vi.mocked(window.musicId3.getProviderCookieStatus).mockResolvedValue("configured"); vi.mocked(window.musicId3.searchMetadata).mockRejectedValue(new Error("secret should not render")); vi.mocked(window.musicId3.clearOnlineCache).mockRejectedValue(new Error("cache internals"));
+    render(<App />); expect(await screen.findByLabelText(/cookie status/i)).toHaveTextContent("configured"); fireEvent.click(screen.getByText("Settings")); fireEvent.click(screen.getByRole("button", { name: /clear online cache/i })); expect(await screen.findByText(/unable to clear online cache/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "query" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); expect((await screen.findAllByText(/metadata search failed/i)).length).toBeGreaterThan(0); expect(screen.queryByText(/secret should not render/i)).not.toBeInTheDocument();
   });
 });
