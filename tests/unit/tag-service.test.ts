@@ -93,6 +93,16 @@ describe("tag service", () => {
     expect((await readAudioMetadata(fixturePath)).common.title).toBe("Scanner fixture");
   });
 
+  it("reads a real FLAC through its concrete Xiph tag instead of treating the composite tag as Xiph", async () => {
+    const fixturePath = path.resolve("tests", "fixtures", "library", "fixture.FlAc");
+
+    const metadata = await readAudioMetadata(fixturePath);
+
+    expect(metadata.durationMs).toBeGreaterThan(0);
+    expect(metadata.errors).toBeUndefined();
+    expect(metadata.raw).toHaveProperty("TITLE");
+  });
+
   it("returns actual multi-value custom ID3v2 raw fields from a real tagged WAV fixture", async () => {
     const fixturePath = await createFixture();
     const file = TagLibFile.createFromPath(fixturePath);

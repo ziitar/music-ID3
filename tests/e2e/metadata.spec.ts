@@ -4,7 +4,7 @@ import { expect, test } from "./electron-fixture";
 
 async function openEditable(page: import("playwright/test").Page) {
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("library-count")).toHaveText("5 items");
+  await expect(page.getByTestId("library-count")).toHaveText("12 items");
   await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
 }
 
@@ -55,6 +55,9 @@ test("catches provider candidates being written without a second explicit confir
   await confirmedCandidate.getByRole("button", { name: "Load candidate details" }).click();
   await confirmedCandidate.getByRole("button", { name: "Apply candidate" }).click();
   await page.getByRole("button", { name: "confirm candidate write" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByTestId("library-row").filter({ hasText: "disc.WaV" }).click();
+  await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
   await expect(page.getByRole("textbox", { name: "title value", exact: true })).toHaveValue("Kind of Blue");
   await expect(page.getByRole("textbox", { name: "artist value", exact: true })).toHaveValue("Miles Davis");
   await expect(page.getByRole("textbox", { name: "album value", exact: true })).toHaveValue("Kind of Blue");

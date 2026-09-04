@@ -28,12 +28,15 @@ function e2eProviderTransport(origin: string, transport: HttpTransport): HttpTra
 
 function e2eScanLibrary(delayMs: number): typeof scanDirectory {
   return async (root, onItem, signal) => {
-    const summary = await scanDirectory(root, () => undefined, signal);
-    for (const item of summary.items) {
-      if (signal?.aborted) break;
-      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
-      if (!signal?.aborted) onItem(item);
-    }
+    let emissions = Promise.resolve();
+    const summary = await scanDirectory(root, (item) => {
+      emissions = emissions.then(async () => {
+        if (signal?.aborted) return;
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (!signal?.aborted) onItem(item);
+      });
+    }, signal);
+    await emissions;
     return summary;
   };
 }

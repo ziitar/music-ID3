@@ -4,7 +4,7 @@ import { expect, test } from "./electron-fixture";
 
 async function scan(page: import("playwright/test").Page) {
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("library-count")).toHaveText("5 items");
+  await expect(page.getByTestId("library-count")).toHaveText("12 items");
 }
 
 async function readText(filePath: string): Promise<string | undefined> {

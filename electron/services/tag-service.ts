@@ -70,13 +70,13 @@ function addRawValue(raw: AudioMetadata["raw"], key: string, values: string[]): 
 }
 
 function concreteTag(handle: TagLibHandle, type: TagTypes): Tag | undefined {
-  if (handle.tag.tagTypes === type) {
-    return handle.tag;
+  const fileTag = handle.getTag?.(type, false);
+  if (fileTag) {
+    return fileTag;
   }
-  return handle.getTag?.(type, false)
-    ?? (typeof (handle.tag as Tag & { getTag?: (tagType: TagTypes) => Tag }).getTag === "function"
-      ? (handle.tag as Tag & { getTag(tagType: TagTypes): Tag }).getTag(type)
-      : undefined);
+  const combinedTag = handle.tag as Tag & { getTag?: (tagType: TagTypes) => Tag };
+  const nestedTag = typeof combinedTag.getTag === "function" ? combinedTag.getTag(type) : undefined;
+  return nestedTag ?? (handle.tag.tagTypes === type ? handle.tag : undefined);
 }
 
 function appleRawItemList(tag: Mpeg4AppleTag): Mpeg4AppleItemListBox | undefined {
