@@ -289,7 +289,102 @@ describe("CUE service", () => {
     expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe(expected);
   });
 
-  it.each(["1" as unknown as number, Number.NaN, -1, 0.5])(
+  it("keeps a title tail comment after TITLE when PERFORMER is added", () => {
+    const rawText = [
+      'TITLE "Album"',
+      "; title tail",
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/album.cue");
+    state.parsed.performer = "Artist";
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe([
+      'PERFORMER "Artist"',
+      'TITLE "Album"',
+      "; title tail",
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n"));
+  });
+
+  it("keeps an index tail comment after INDEX 01 when INDEX 00 is added", () => {
+    const rawText = [
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:10",
+      "    ; index tail"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/album.cue");
+    state.parsed.tracks[0].indexes.unshift({ number: 0, time: "00:00:00" });
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe([
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 00 00:00:00",
+      "    INDEX 01 00:00:10",
+      "    ; index tail"
+    ].join("\n"));
+  });
+
+  it.each([
+    [
+      ['TITLE "Before"', "; between", 'PERFORMER "Before Artist"'],
+      ['TITLE "After"', "; between", 'PERFORMER "After Artist"']
+    ],
+    [
+      ['PERFORMER "Before Artist"', "; between", 'TITLE "Before"'],
+      ['PERFORMER "After Artist"', "; between", 'TITLE "After"']
+    ]
+  ])("retains a comment between the same noncanonical neighboring directives", (albumLines, expectedAlbumLines) => {
+    const suffix = ['FILE "disc.flac" WAVE', "  TRACK 01 AUDIO", "    INDEX 01 00:00:00"];
+    const state = parseCue([...albumLines, ...suffix].join("\n"), "D:/Music/noncanonical.cue");
+    state.parsed.title = "After";
+    state.parsed.performer = "After Artist";
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe([...expectedAlbumLines, ...suffix].join("\n"));
+  });
+
+  it("retains same-position comments and blank lines in source order", () => {
+    const rawText = [
+      'TITLE "Before"',
+      "; first",
+      "",
+      "; second",
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/comments.cue");
+    state.parsed.title = "After";
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe(rawText.replace("Before", "After"));
+  });
+
+  it("uses the trusted source layout to validate anchors after a modeled field is removed", () => {
+    const rawText = [
+      'PERFORMER "Artist"',
+      'TITLE "Album"',
+      "; title tail",
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/comments.cue");
+    delete state.parsed.performer;
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe([
+      'TITLE "Album"',
+      "; title tail",
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n"));
+  });
+
+  it.each(["1" as unknown as number, Number.NaN, -1, 0.5, 999])(
     "rejects renderer-shaped invalid preserved-line position %s",
     (position) => {
       const document: CueDocument = {

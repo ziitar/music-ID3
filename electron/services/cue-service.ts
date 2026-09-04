@@ -246,6 +246,32 @@ function quote(value: string): string {
   return `"${value.replaceAll('"', "''")}"`;
 }
 
+type ModeledLine = { key: string; text: string };
+
+function albumModeledLines(document: CueDocument): ModeledLine[] {
+  const lines = document.remarks.map((remark, index) => ({ key: `rem:${index}`, text: `REM ${remark}` }));
+  if (document.songwriter) lines.push({ key: "songwriter", text: `SONGWRITER ${quote(document.songwriter)}` });
+  if (document.performer) lines.push({ key: "performer", text: `PERFORMER ${quote(document.performer)}` });
+  if (document.title) lines.push({ key: "title", text: `TITLE ${quote(document.title)}` });
+  return lines;
+}
+
+function trackModeledLines(track: CueTrack): ModeledLine[] {
+  const lines: ModeledLine[] = [];
+  if (track.title) lines.push({ key: "title", text: `    TITLE ${quote(track.title)}` });
+  if (track.performer) lines.push({ key: "performer", text: `    PERFORMER ${quote(track.performer)}` });
+  if (track.songwriter) lines.push({ key: "songwriter", text: `    SONGWRITER ${quote(track.songwriter)}` });
+  if (track.pregap) lines.push({ key: "pregap", text: `    PREGAP ${track.pregap}` });
+  for (const index of track.indexes) {
+    lines.push({
+      key: `index:${index.number}`,
+      text: `    INDEX ${String(index.number).padStart(2, "0")} ${index.time}`
+    });
+  }
+  if (track.postgap) lines.push({ key: "postgap", text: `    POSTGAP ${track.postgap}` });
+  return lines;
+}
+
 function canonicalCueText(document: CueDocument): string {
   const lines: string[] = [];
   const preserved = (scope: CuePreservedLine["scope"], fileIndex?: number, trackIndex?: number): CuePreservedLine[] => (
@@ -257,7 +283,7 @@ function canonicalCueText(document: CueDocument): string {
     const result: string[] = [];
     for (let position = 0; position <= structured.length; position += 1) {
       result.push(...retained
-        .filter((line) => Math.min(line.position, structured.length) === position)
+        .filter((line) => line.position === position)
         .map((line) => line.text));
       if (position < structured.length) {
         result.push(structured[position]);
@@ -265,13 +291,7 @@ function canonicalCueText(document: CueDocument): string {
     }
     return result;
   };
-  const albumLines: string[] = [];
-  for (const remark of document.remarks) {
-    albumLines.push(`REM ${remark}`);
-  }
-  if (document.songwriter) albumLines.push(`SONGWRITER ${quote(document.songwriter)}`);
-  if (document.performer) albumLines.push(`PERFORMER ${quote(document.performer)}`);
-  if (document.title) albumLines.push(`TITLE ${quote(document.title)}`);
+  const albumLines = albumModeledLines(document).map((line) => line.text);
   lines.push(...interleave(albumLines, preserved("album")));
 
   for (const [fileIndex, file] of document.files.entries()) {
@@ -282,15 +302,7 @@ function canonicalCueText(document: CueDocument): string {
         continue;
       }
       lines.push(`  TRACK ${String(track.number).padStart(2, "0")} ${track.type ?? "AUDIO"}`);
-      const trackLines: string[] = [];
-      if (track.title) trackLines.push(`    TITLE ${quote(track.title)}`);
-      if (track.performer) trackLines.push(`    PERFORMER ${quote(track.performer)}`);
-      if (track.songwriter) trackLines.push(`    SONGWRITER ${quote(track.songwriter)}`);
-      if (track.pregap) trackLines.push(`    PREGAP ${track.pregap}`);
-      for (const index of track.indexes) {
-        trackLines.push(`    INDEX ${String(index.number).padStart(2, "0")} ${index.time}`);
-      }
-      if (track.postgap) trackLines.push(`    POSTGAP ${track.postgap}`);
+      const trackLines = trackModeledLines(track).map((line) => line.text);
       lines.push(...interleave(trackLines, preserved("track", fileIndex, trackIndex)));
     }
   }
@@ -298,6 +310,164 @@ function canonicalCueText(document: CueDocument): string {
     lines.push(...document.unknownLines);
   }
   return lines.join("\n");
+}
+
+type SourceScope = "album" | "file" | "track";
+type SourceSegment =
+  | { kind: "scope"; scope: SourceScope; fileIndex?: number; trackIndex?: number; lines: string[] }
+  | { kind: "file"; fileIndex: number }
+  | { kind: "track"; fileIndex: number; trackIndex: number };
+
+type ScopeLayoutLengths = { album: number; files: number[]; tracks: number[] };
+
+function sourceSegments(sourceText: string): SourceSegment[] {
+  const segments: SourceSegment[] = [{ kind: "scope", scope: "album", lines: [] }];
+  let current = segments[0] as Extract<SourceSegment, { kind: "scope" }>;
+  let fileIndex = -1;
+  let trackIndex = -1;
+  for (const line of sourceText.split(/\r?\n/)) {
+    const command = cueCommand(line);
+    if (command === "FILE") {
+      fileIndex += 1;
+      segments.push({ kind: "file", fileIndex });
+      current = { kind: "scope", scope: "file", fileIndex, lines: [] };
+      segments.push(current);
+    } else if (command === "TRACK") {
+      trackIndex += 1;
+      segments.push({ kind: "track", fileIndex, trackIndex });
+      current = { kind: "scope", scope: "track", fileIndex, trackIndex, lines: [] };
+      segments.push(current);
+    } else {
+      current.lines.push(line);
+    }
+  }
+  return segments;
+}
+
+function sourceLayoutLengths(sourceText: string): ScopeLayoutLengths {
+  const layout: ScopeLayoutLengths = { album: 0, files: [], tracks: [] };
+  for (const segment of sourceSegments(sourceText)) {
+    if (segment.kind !== "scope") {
+      continue;
+    }
+    const length = segment.lines.filter((line) => {
+      const command = cueCommand(line);
+      return command !== undefined && modeledCommands.has(command);
+    }).length;
+    if (segment.scope === "album") {
+      layout.album = length;
+    } else if (segment.scope === "file") {
+      layout.files[segment.fileIndex as number] = length;
+    } else {
+      layout.tracks[segment.trackIndex as number] = length;
+    }
+  }
+  return layout;
+}
+
+function structuredLayoutLengths(document: CueDocument): ScopeLayoutLengths {
+  return {
+    album: albumModeledLines(document).length,
+    files: document.files.map(() => 0),
+    tracks: document.tracks.map((track) => trackModeledLines(track).length)
+  };
+}
+
+function sourceTopologyMatches(source: CueDocument, submitted: CueDocument): boolean {
+  return source.files.length === submitted.files.length
+    && source.tracks.length === submitted.tracks.length
+    && source.tracks.every(
+      (track, index) => (track.fileIndex ?? 0) === (submitted.tracks[index].fileIndex ?? 0)
+    );
+}
+
+function overlayScope(sourceLines: string[], scope: SourceScope, desired: ModeledLine[]): string[] {
+  let remIndex = 0;
+  const keyForLine = (line: string): string | undefined => {
+    const command = cueCommand(line);
+    if (scope === "album") {
+      if (command === "REM") return `rem:${remIndex++}`;
+      if (command === "SONGWRITER") return "songwriter";
+      if (command === "PERFORMER") return "performer";
+      if (command === "TITLE") return "title";
+      return undefined;
+    }
+    if (scope !== "track") {
+      return undefined;
+    }
+    if (command === "TITLE") return "title";
+    if (command === "PERFORMER") return "performer";
+    if (command === "SONGWRITER") return "songwriter";
+    if (command === "PREGAP") return "pregap";
+    if (command === "POSTGAP") return "postgap";
+    if (command === "INDEX") {
+      const number = line.trim().match(/^INDEX\s+(\d+)/)?.[1];
+      return number === undefined ? undefined : `index:${Number(number)}`;
+    }
+    return undefined;
+  };
+
+  type OverlayEntry = { kind: "modeled"; key: string; text: string; desiredOrder: number } | { kind: "preserved"; text: string };
+  const desiredByKey = new Map(desired.map((line, index) => [line.key, { ...line, desiredOrder: index }]));
+  const used = new Set<string>();
+  const entries: OverlayEntry[] = [];
+  for (const line of sourceLines) {
+    const key = keyForLine(line);
+    if (key === undefined) {
+      entries.push({ kind: "preserved", text: line });
+      continue;
+    }
+    const replacement = desiredByKey.get(key);
+    if (replacement && !used.has(key)) {
+      entries.push({ kind: "modeled", key, text: replacement.text, desiredOrder: replacement.desiredOrder });
+      used.add(key);
+    }
+  }
+
+  for (const [desiredOrder, line] of desired.entries()) {
+    if (used.has(line.key)) {
+      continue;
+    }
+    const before = entries.findIndex((entry) => entry.kind === "modeled" && entry.desiredOrder > desiredOrder);
+    if (before >= 0) {
+      entries.splice(before, 0, { kind: "modeled", key: line.key, text: line.text, desiredOrder });
+    } else {
+      let after = -1;
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        if (entries[index].kind === "modeled") {
+          after = index + 1;
+          break;
+        }
+      }
+      entries.splice(after < 0 ? 0 : after, 0, { kind: "modeled", key: line.key, text: line.text, desiredOrder });
+    }
+    used.add(line.key);
+  }
+  return entries.map((entry) => entry.text);
+}
+
+function overlayTrustedSource(sourceText: string, source: CueDocument, submitted: CueDocument): string | undefined {
+  if (!sourceTopologyMatches(source, submitted)) {
+    return undefined;
+  }
+
+  const output: string[] = [];
+  for (const segment of sourceSegments(sourceText)) {
+    if (segment.kind === "file") {
+      const file = submitted.files[segment.fileIndex];
+      output.push(`FILE ${quote(file.path)} ${file.type ?? "WAVE"}`);
+    } else if (segment.kind === "track") {
+      const track = submitted.tracks[segment.trackIndex];
+      output.push(`  TRACK ${String(track.number).padStart(2, "0")} ${track.type ?? "AUDIO"}`);
+    } else if (segment.scope === "album") {
+      output.push(...overlayScope(segment.lines, "album", albumModeledLines(submitted)));
+    } else if (segment.scope === "file") {
+      output.push(...segment.lines);
+    } else {
+      output.push(...overlayScope(segment.lines, "track", trackModeledLines(submitted.tracks[segment.trackIndex as number])));
+    }
+  }
+  return output.join(sourceText.includes("\r\n") ? "\r\n" : "\n");
 }
 
 const cueTimePattern = /^(\d{2,}):([0-5]\d):([0-7]\d)$/;
@@ -310,7 +480,7 @@ function cueTimeFrames(value: string): number {
   return (Number(match[1]) * 60 + Number(match[2])) * 75 + Number(match[3]);
 }
 
-export function validateCueDocument(document: CueDocument): void {
+export function validateCueDocument(document: CueDocument, layout = structuredLayoutLengths(document)): void {
   if (document.files.length === 0 || document.files.some((file) => file.path.trim() === "")) {
     throw new Error("CUE requires a non-empty FILE reference");
   }
@@ -393,21 +563,38 @@ export function validateCueDocument(document: CueDocument): void {
     ) {
       throw new Error("Invalid preserved-line anchor for TRACK scope");
     }
+    const positionLimit = line.scope === "album"
+      ? layout.album
+      : line.scope === "file"
+        ? layout.files[line.fileIndex as number]
+        : layout.tracks[line.trackIndex as number];
+    if (line.position > positionLimit) {
+      throw new Error("Preserved CUE lines require a non-negative position anchor within their scope");
+    }
   }
 }
 
 export function serializeCue(document: CueDocument, encoding: CueEncoding): Buffer {
-  validateCueDocument(document);
-  let text = canonicalCueText(document);
+  let text: string;
   if (document.sourceText !== undefined) {
+    const sourceLayout = sourceLayoutLengths(document.sourceText);
     const sourceDocument = parserDocument(
       parseWithCueParser(document.sourceText, "submitted-source.cue"),
       document.sourceText
     );
-    validateCueDocument(sourceDocument);
+    validateCueDocument(sourceDocument, sourceLayout);
+    const topologyMatches = sourceTopologyMatches(sourceDocument, document);
+    validateCueDocument(document, topologyMatches ? sourceLayout : undefined);
     if (documentFingerprint(sourceDocument) === documentFingerprint(document)) {
       text = document.sourceText;
+    } else if (topologyMatches) {
+      text = overlayTrustedSource(document.sourceText, sourceDocument, document) ?? canonicalCueText(document);
+    } else {
+      text = canonicalCueText(document);
     }
+  } else {
+    validateCueDocument(document);
+    text = canonicalCueText(document);
   }
   return encodeCueText(text, encoding);
 }
