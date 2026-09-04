@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApeTag,
   ApeTagItem,
@@ -373,6 +373,21 @@ describe("tag service", () => {
       ok: false,
       error: "Metadata write verification failed for title"
     });
+  });
+
+  it("returns current metadata for an empty patch without saving", async () => {
+    const save = vi.fn();
+    const service = createTagService({
+      open: () => ({
+        tag: { title: "Unchanged", pictures: [] } as Tag,
+        properties: { durationMilliseconds: 1, codecs: [] },
+        save,
+        dispose: () => undefined
+      })
+    });
+
+    await expect(service.writeAudioMetadata("no-op.mp3", { fields: {}, selectedFields: [] })).resolves.toMatchObject({ ok: true, metadata: { common: { title: "Unchanged" } } });
+    expect(save).not.toHaveBeenCalled();
   });
 
   it("extracts a cover from the narrow TagLib adapter boundary", async () => {

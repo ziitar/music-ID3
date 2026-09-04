@@ -298,6 +298,12 @@ export function createTagService(adapter: TagLibAdapter = tagLibAdapter) {
   }
 
   async function writeAudioMetadata(filePath: string, patch: MetadataPatch): Promise<WriteResult> {
+    if (patch.selectedFields.length === 0) {
+      const metadata = await readAudioMetadata(filePath);
+      return metadata.errors?.length
+        ? { ok: false, error: metadata.errors.join("; ") }
+        : { ok: true, metadata };
+    }
     const format = extensionFor(filePath);
     const validationError = validatePatch(patch);
     if (validationError) {

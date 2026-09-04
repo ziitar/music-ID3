@@ -106,4 +106,41 @@ describe("editor store async ownership", () => {
 
     expect(store.getState().candidates.map((candidate) => candidate.id)).toEqual(["new"]);
   });
+
+  it("does not replace the current editor when a confirmed write for the prior item completes", async () => {
+    const write = deferred<Awaited<ReturnType<MusicId3Api["writeAudio"]>>>();
+    const api = { writeAudio: vi.fn(() => write.promise) } as unknown as MusicId3Api;
+    const store = createEditorStore(api);
+    store.setItem(audio("D:/A.flac")); store.setField("title", "Written A"); store.setFieldSelected("title", true);
+
+    const pending = store.confirmAudioWrite();
+    store.setItem(audio("D:/B.flac"));
+    write.resolve({ ok: true, metadata: { common: { title: "Written A" }, raw: {}, durationMs: 1 } });
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(store.getState()).toMatchObject({ item: { path: "D:/B.flac", metadata: { common: { title: "B.flac title" } } }, draft: { title: "B.flac title" }, selectedFields: [] });
+  });
+
+  it("rejects a detailed candidate when no selected usable fields remain", async () => {
+    const writeAudio = vi.fn();
+    const api = { getMetadataCandidate: vi.fn(async () => ({ ...summary, cover: undefined })), writeAudio } as unknown as MusicId3Api;
+    const store = createEditorStore(api); store.setItem(audio("D:/A.flac"));
+
+    await expect(store.applyCandidate(summary, ["cover"])).resolves.toBeUndefined();
+
+    expect(store.getState()).toMatchObject({ selectedFields: [], diff: [], error: "No applicable candidate fields selected" });
+    expect(writeAudio).not.toHaveBeenCalled();
+  });
+
+  it("applies an already loaded detailed candidate without fetching it again", async () => {
+    const cover = { mimeType: "image/jpeg", data: "AQID" };
+    const getMetadataCandidate = vi.fn();
+    const store = createEditorStore({ getMetadataCandidate } as unknown as MusicId3Api); store.setItem(audio("D:/A.flac"));
+    const detailed = { ...summary, title: "Detailed", cover, confidence: "high" as const };
+
+    await expect(store.applyCandidate(detailed, ["cover"], true)).resolves.toMatchObject({ candidate: detailed });
+
+    expect(getMetadataCandidate).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({ draft: { cover }, selectedFields: ["cover"] });
+  });
 });
