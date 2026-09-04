@@ -1,0 +1,10 @@
+.worktrees/
+.superpowers/
+node_modules/
+dist/
+dist-electron/
+release/
+coverage/
+playwright-report/
+test-results/
+*.log
