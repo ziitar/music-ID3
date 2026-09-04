@@ -150,6 +150,37 @@ describe("tag service", () => {
     });
   });
 
+  it("keeps Apple common metadata when its private raw item list is incompatible", async () => {
+    const apple = {
+      tagTypes: TagTypes.Apple,
+      title: "Still readable",
+      performers: [],
+      albumArtists: [],
+      album: undefined,
+      track: 0,
+      trackCount: 0,
+      disc: 0,
+      discCount: 0,
+      year: 0,
+      genres: [],
+      composers: [],
+      comment: undefined,
+      lyrics: undefined,
+      copyright: undefined,
+      pictures: [],
+      _ilstBox: {}
+    } as Tag;
+
+    const metadata = await serviceForTag(apple).readAudioMetadata("fixture.m4a");
+
+    expect(metadata).toEqual(expect.objectContaining({
+      common: expect.objectContaining({ title: "Still readable" }),
+      raw: {},
+      durationMs: 12
+    }));
+    expect(metadata.errors).toBeUndefined();
+  });
+
   it("returns Xiph raw text values and omits picture fields", async () => {
     const xiph = XiphComment.fromEmpty();
     xiph.setFieldAsStrings("CATALOGNUMBER", "x-1", "x-2");
@@ -253,6 +284,39 @@ describe("tag service", () => {
       fields: { trackNumber: 0 },
       selectedFields: ["trackNumber"]
     })).resolves.toMatchObject({ ok: true, metadata: { common: { trackNumber: undefined } } });
+  });
+
+  it("accepts an empty array when a writer rereads a cleared field as undefined", async () => {
+    const emptyTag = () => ({
+      title: undefined,
+      performers: [],
+      albumArtists: [],
+      album: undefined,
+      track: 0,
+      trackCount: 0,
+      disc: 0,
+      discCount: 0,
+      year: 0,
+      genres: [],
+      composers: [],
+      comment: undefined,
+      lyrics: undefined,
+      copyright: undefined,
+      pictures: []
+    } as Tag);
+    const service = createTagService({
+      open: () => ({
+        tag: emptyTag(),
+        properties: { durationMilliseconds: 1, codecs: [] },
+        save: () => undefined,
+        dispose: () => undefined
+      })
+    });
+
+    await expect(service.writeAudioMetadata("cleared.mp3", {
+      fields: { title: [] as unknown as string },
+      selectedFields: ["title"]
+    })).resolves.toMatchObject({ ok: true, metadata: { common: { title: undefined } } });
   });
 
   it("normalizes equivalent cover MIME spellings during verification", async () => {

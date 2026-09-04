@@ -83,25 +83,32 @@ function appleRawItemList(tag: Mpeg4AppleTag): Mpeg4AppleItemListBox | undefined
   return (tag as unknown as { _ilstBox?: Mpeg4AppleItemListBox })._ilstBox;
 }
 
-function extractAppleRawTags(raw: AudioMetadata["raw"], tag: Mpeg4AppleTag): void {
-  const itemList = appleRawItemList(tag);
-  if (!itemList) {
-    return;
-  }
+function isAppleRawItemList(value: unknown): value is Mpeg4AppleItemListBox {
+  return typeof value === "object" && value !== null && Array.isArray((value as { children?: unknown }).children);
+}
 
-  for (const atom of itemList.children) {
-    const atomType = atom.boxType.toString(StringType.Latin1);
-    const dataBoxes = atom.getChildren<Mpeg4AppleDataBox>(Mpeg4BoxType.DATA);
-    const text = dataBoxes.map((box) => box.text).filter((value): value is string => value !== undefined);
-    if (atomType === "----") {
-      const mean = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.MEAN)?.text;
-      const name = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.NAME)?.text;
-      if (mean && name) {
-        addRawValue(raw, `MP4:----:${mean}:${name}`, text);
-      }
-    } else {
-      addRawValue(raw, `MP4:${atomType}`, text);
+function extractAppleRawTags(raw: AudioMetadata["raw"], tag: Mpeg4AppleTag): void {
+  try {
+    const itemList = appleRawItemList(tag);
+    if (!isAppleRawItemList(itemList)) {
+      return;
     }
+    for (const atom of itemList.children) {
+      const atomType = atom.boxType.toString(StringType.Latin1);
+      const dataBoxes = atom.getChildren<Mpeg4AppleDataBox>(Mpeg4BoxType.DATA);
+      const text = dataBoxes.map((box) => box.text).filter((value): value is string => value !== undefined);
+      if (atomType === "----") {
+        const mean = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.MEAN)?.text;
+        const name = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.NAME)?.text;
+        if (mean && name) {
+          addRawValue(raw, `MP4:----:${mean}:${name}`, text);
+        }
+      } else {
+        addRawValue(raw, `MP4:${atomType}`, text);
+      }
+    }
+  } catch {
+    // Raw Apple atoms depend on private wrapper structures; common metadata remains authoritative.
   }
 }
 
