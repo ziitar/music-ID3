@@ -4,8 +4,15 @@ import {
   ApeTagItemType,
   ByteVector,
   File as TagLibFile,
+  Id3v2CommentsFrame,
   Id3v2TextInformationFrame,
+  Id3v2UnsynchronizedLyricsFrame,
   Id3v2UserTextInformationFrame,
+  Mpeg4AppleAdditionalInfoBox,
+  Mpeg4AppleDataBox,
+  Mpeg4AppleItemListBox,
+  Mpeg4AppleTag,
+  Mpeg4BoxType,
   Picture,
   StringType,
   TagTypes,
@@ -72,6 +79,32 @@ function concreteTag(handle: TagLibHandle, type: TagTypes): Tag | undefined {
       : undefined);
 }
 
+function appleRawItemList(tag: Mpeg4AppleTag): Mpeg4AppleItemListBox | undefined {
+  return (tag as unknown as { _ilstBox?: Mpeg4AppleItemListBox })._ilstBox;
+}
+
+function extractAppleRawTags(raw: AudioMetadata["raw"], tag: Mpeg4AppleTag): void {
+  const itemList = appleRawItemList(tag);
+  if (!itemList) {
+    return;
+  }
+
+  for (const atom of itemList.children) {
+    const atomType = atom.boxType.toString(StringType.Latin1);
+    const dataBoxes = atom.getChildren<Mpeg4AppleDataBox>(Mpeg4BoxType.DATA);
+    const text = dataBoxes.map((box) => box.text).filter((value): value is string => value !== undefined);
+    if (atomType === "----") {
+      const mean = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.MEAN)?.text;
+      const name = atom.getChild<Mpeg4AppleAdditionalInfoBox>(Mpeg4BoxType.NAME)?.text;
+      if (mean && name) {
+        addRawValue(raw, `MP4:----:${mean}:${name}`, text);
+      }
+    } else {
+      addRawValue(raw, `MP4:${atomType}`, text);
+    }
+  }
+}
+
 function extractRawTags(handle: TagLibHandle): AudioMetadata["raw"] {
   const raw: AudioMetadata["raw"] = {};
   const id3 = concreteTag(handle, TagTypes.Id3v2) as Id3v2Tag | undefined;
@@ -79,10 +112,19 @@ function extractRawTags(handle: TagLibHandle): AudioMetadata["raw"] {
     for (const frame of id3.frames) {
       if (frame instanceof Id3v2UserTextInformationFrame) {
         addRawValue(raw, `TXXX:${frame.description}`, frame.text);
+      } else if (frame instanceof Id3v2CommentsFrame) {
+        addRawValue(raw, `COMM:${frame.language}:${frame.description}`, [frame.text]);
+      } else if (frame instanceof Id3v2UnsynchronizedLyricsFrame) {
+        addRawValue(raw, `USLT:${frame.language}:${frame.description}`, [frame.text]);
       } else if (frame instanceof Id3v2TextInformationFrame) {
         addRawValue(raw, frame.frameId.toString(), frame.text);
       }
     }
+  }
+
+  const apple = concreteTag(handle, TagTypes.Apple) as Mpeg4AppleTag | undefined;
+  if (apple) {
+    extractAppleRawTags(raw, apple);
   }
 
   const xiph = concreteTag(handle, TagTypes.Xiph) as XiphComment | undefined;
@@ -148,6 +190,46 @@ function validatePatch(patch: MetadataPatch): WriteResult | undefined {
   return undefined;
 }
 
+function clearValueMatchesUndefined(value: unknown): boolean {
+  return value === "" || value === 0 || (Array.isArray(value) && value.length === 0);
+}
+
+function inferredImageMimeType(bytes: Buffer): string | undefined {
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+    return "image/jpeg";
+  }
+  if (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a") {
+    return "image/gif";
+  }
+  if (bytes.subarray(0, 2).toString("ascii") === "BM") {
+    return "image/bmp";
+  }
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+function normalizedCoverMimeType(cover: CoverArt): string {
+  const inferred = inferredImageMimeType(Buffer.from(cover.data, "base64"));
+  if (inferred) {
+    return inferred;
+  }
+  const declared = cover.mimeType.toLowerCase().split(";", 1)[0].trim();
+  return declared === "image/x-png" ? "image/png" : declared === "image/jpg" ? "image/jpeg" : declared;
+}
+
+function coversMatch(expected: CoverArt | undefined, actual: CoverArt | undefined): boolean {
+  if (!expected || !actual) {
+    return expected === actual;
+  }
+  return Buffer.from(expected.data, "base64").equals(Buffer.from(actual.data, "base64"))
+    && normalizedCoverMimeType(expected) === normalizedCoverMimeType(actual);
+}
+
 function selectedFieldsMatch(metadata: AudioMetadata, patch: MetadataPatch): MetadataField[] {
   return patch.selectedFields.filter((field) => {
     const expected = patch.fields[field];
@@ -155,9 +237,9 @@ function selectedFieldsMatch(metadata: AudioMetadata, patch: MetadataPatch): Met
     if (field === "cover") {
       const expectedCover = expected as CoverArt | undefined;
       const actualCover = actual as CoverArt | undefined;
-      return expectedCover?.mimeType !== actualCover?.mimeType || expectedCover?.data !== actualCover?.data;
+      return !coversMatch(expectedCover, actualCover);
     }
-    return expected !== actual;
+    return expected !== actual && !(actual === undefined && clearValueMatchesUndefined(expected));
   });
 }
 
@@ -236,7 +318,7 @@ export function createTagService(adapter: TagLibAdapter = tagLibAdapter) {
       }
       const mismatchedFields = selectedFieldsMatch(metadata, patch);
       return mismatchedFields.length > 0
-        ? { ok: false, error: `Metadata write verification failed for ${mismatchedFields.join(", ")}`, unsupportedFields: mismatchedFields }
+        ? { ok: false, error: `Metadata write verification failed for ${mismatchedFields.join(", ")}` }
         : { ok: true, metadata };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
