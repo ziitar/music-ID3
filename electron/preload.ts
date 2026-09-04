@@ -3,8 +3,8 @@ import { ipcChannels, type MusicId3Api } from "../shared/ipc";
 
 const musicId3: MusicId3Api = {
   selectDirectory: () => ipcRenderer.invoke(ipcChannels.selectDirectory),
-  scanDirectory: (directoryPath) => ipcRenderer.invoke(ipcChannels.scanDirectory, directoryPath),
-  cancelScan: (scanId) => ipcRenderer.invoke(ipcChannels.cancelScan, scanId),
+  scanDirectory: (directoryPath, requestId) => ipcRenderer.invoke(ipcChannels.scanDirectory, directoryPath, requestId),
+  cancelScan: (requestId) => ipcRenderer.invoke(ipcChannels.cancelScan, requestId),
   readAudio: (audioPath) => ipcRenderer.invoke(ipcChannels.readAudio, audioPath),
   writeAudio: (audioPath, patch) => ipcRenderer.invoke(ipcChannels.writeAudio, audioPath, patch),
   readCue: (cuePath) => ipcRenderer.invoke(ipcChannels.readCue, cuePath),

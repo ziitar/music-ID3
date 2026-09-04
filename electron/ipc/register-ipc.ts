@@ -97,36 +97,39 @@ export function registerIpcHandlers({
     return result.canceled ? undefined : result.filePaths[0];
   });
 
-  ipcMain.handle(ipcChannels.scanDirectory, (event, directoryPath) => {
+  ipcMain.handle(ipcChannels.scanDirectory, (event, directoryPath, rendererRequestId) => {
     const root = asString(directoryPath, "path");
+    const requestId = asString(rendererRequestId, "requestId");
     const scanId = randomUUID();
     let scannedCount = 0;
     const controller = new AbortController();
-    scans.set(scanId, controller);
+    scans.get(requestId)?.abort();
+    scans.set(requestId, controller);
     void scanLibrary(root, (item) => {
       if (controller.signal.aborted) return;
       scannedCount += 1;
-      publishScanProgress(event, { scanId, item, scannedCount, phase: "scanning" });
+      publishScanProgress(event, { requestId, scanId, item, scannedCount, phase: "scanning" });
     }, controller.signal).then((summary) => {
       if (controller.signal.aborted) return;
       for (const scanError of summary.errors) {
-        publishScanProgress(event, { scanId, scannedCount, phase: "error", error: `${scanError.path}: ${scanError.error}` });
+        publishScanProgress(event, { requestId, scanId, scannedCount, phase: "error", error: `${scanError.path}: ${scanError.error}` });
       }
-      publishScanProgress(event, { scanId, scannedCount, totalCount: summary.items.length, phase: "complete" });
+      publishScanProgress(event, { requestId, scanId, scannedCount, totalCount: summary.items.length, phase: "complete" });
     }).catch((error) => {
       if (controller.signal.aborted) return;
       publishScanProgress(event, {
+        requestId,
         scanId,
         scannedCount,
         phase: "error",
         error: error instanceof Error ? error.message : String(error)
       });
-    }).finally(() => scans.delete(scanId));
-    return { ok: true, scanId };
+    }).finally(() => { if (scans.get(requestId) === controller) scans.delete(requestId); });
+    return { ok: true, requestId, scanId };
   });
 
-  ipcMain.handle(ipcChannels.cancelScan, (_event, scanId) => {
-    scans.get(asString(scanId, "scanId"))?.abort();
+  ipcMain.handle(ipcChannels.cancelScan, (_event, requestId) => {
+    scans.get(asString(requestId, "requestId"))?.abort();
   });
 
   ipcMain.handle(ipcChannels.readAudio, (_event, audioPath) => {
@@ -165,8 +168,12 @@ export function registerIpcHandlers({
     const adapter = metadataAdapters[metadataSource];
     if (!adapter) throw new Error(`Metadata source ${metadataSource} is not configured`);
     const candidate = await adapter.getDetails(asString(id, "id"));
-    const cover = await adapter.getCover(candidate);
-    return { ...candidate, ...(cover ? { cover } : {}) };
+    try {
+      const cover = await adapter.getCover(candidate);
+      return { ...candidate, ...(cover ? { cover } : {}) };
+    } catch {
+      return { ...candidate, warnings: [...(candidate.warnings ?? []), "Cover art unavailable"] };
+    }
   });
 
   ipcMain.handle(ipcChannels.setProviderCookie, async (_event, source, value) => {

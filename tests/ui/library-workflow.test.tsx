@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../src/App";
 import type { LibraryItem, ScanProgress } from "../../shared/types";
@@ -41,7 +41,7 @@ describe("library editing workflow", () => {
     expect(screen.getByRole("region", { name: /library/i })).toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: /details/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /scan/i }));
-    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledWith("D:/音乐"));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledWith("D:/音乐", expect.any(String)));
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() });
     expect(await screen.findByText("track.flac")).toBeInTheDocument();
     expect(screen.getByText(/suspected/i)).toBeInTheDocument();
@@ -98,6 +98,16 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalled());
   });
 
+  it("refreshes the library and editor from disk after a successful CUE save", async () => {
+    const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: 'TITLE "Before"', parsed: { title: "Before", remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
+    vi.mocked(window.musicId3.readCue).mockResolvedValue({ path: cue.path, encoding: "utf8", rawText: 'TITLE "After"', parsed: { title: "After", remarks: [], files: [{ path: "missing.flac" }], tracks: [], unknownLines: [] }, referencedFiles: ["D:/音乐/missing.flac"], missingReferencedFiles: ["D:/音乐/missing.flac"], parseError: "Missing TRACK" });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
+
+    await waitFor(() => expect(window.musicId3.readCue).toHaveBeenCalledWith(cue.path));
+    expect(await screen.findByText("Missing TRACK")).toBeInTheDocument();
+    expect(screen.getByText(/missing references/i)).toHaveTextContent("missing.flac");
+  });
+
   it("applies selected candidate fields and refreshes after confirmed write", async () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
@@ -107,6 +117,49 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: expect.objectContaining({ title: "New title", artist: "Artist" }), selectedFields: expect.arrayContaining(["title", "artist"]) })));
     expect(window.musicId3.readAudio).toHaveBeenCalledWith("D:/音乐/track.flac");
     await waitFor(() => expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument());
+  });
+
+  it("loads detailed candidate fields before applying selected cover art", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "detail", source: "musicbrainz", title: "Search title", confidence: "medium" }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "detail", source: "musicbrainz", title: "Detailed title", date: "2026", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "detail" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    await screen.findByText("Search title");
+    const candidateRow = screen.getByRole("button", { name: /load candidate details/i }).closest(".candidate-row") as HTMLElement;
+    expect(within(candidateRow).getByRole("checkbox", { name: /cover/i })).toBeDisabled();
+    fireEvent.click(within(candidateRow).getByRole("button", { name: /load candidate details/i }));
+    await waitFor(() => expect(within(candidateRow).getByRole("checkbox", { name: /cover/i })).toBeEnabled());
+    expect(within(candidateRow).getByRole("checkbox", { name: /date/i })).toBeEnabled();
+    fireEvent.click(within(candidateRow).getByRole("checkbox", { name: /cover/i }));
+    fireEvent.click(within(candidateRow).getByRole("button", { name: /apply candidate/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: expect.objectContaining({ cover: { mimeType: "image/jpeg", data: "AQID" } }), selectedFields: expect.arrayContaining(["cover"]) })));
+  });
+
+  it("offers only providers relevant to the selected item type", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac"));
+    const audioProviders = within(screen.getByLabelText("provider"));
+    expect(audioProviders.getAllByRole("option", { name: /musicbrainz|netease|qq music/i })).toHaveLength(3);
+    expect(audioProviders.queryByRole("option", { name: /ctdb/i })).not.toBeInTheDocument();
+
+    const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: "", parsed: { remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: cue }); fireEvent.click(await screen.findByText("album.cue"));
+    const cueProviders = within(screen.getByLabelText("provider"));
+    expect(cueProviders.getAllByRole("option", { name: /musicbrainz/i })).toHaveLength(1);
+    expect(cueProviders.queryByRole("option", { name: /netease|qq music|ctdb/i })).not.toBeInTheDocument();
+  });
+
+  it("disables normal-audio candidate apply when no selected field is available", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValueOnce([{ id: "with-cover", source: "musicbrainz", title: "With cover", confidence: "high" }]).mockResolvedValueOnce([{ id: "without-cover", source: "musicbrainz", title: "Without cover", confidence: "high" }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "with-cover", source: "musicbrainz", title: "With cover", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "candidate" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    const firstRow = (await screen.findByText("With cover")).closest(".candidate-row") as HTMLElement;
+    fireEvent.click(within(firstRow).getByRole("button", { name: /load candidate details/i }));
+    await waitFor(() => expect(within(firstRow).getByRole("checkbox", { name: /cover/i })).toBeEnabled());
+    fireEvent.click(within(firstRow).getByRole("checkbox", { name: /title/i }));
+    fireEvent.click(within(firstRow).getByRole("checkbox", { name: /cover/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    const secondRow = (await screen.findByText("Without cover")).closest(".candidate-row") as HTMLElement;
+    expect(within(secondRow).getByRole("button", { name: /apply candidate/i })).toBeDisabled();
   });
 
   it("keeps candidate confirmation open and does not refresh after a rejected write", async () => {
@@ -135,6 +188,25 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ encoding: "utf8", document: expect.objectContaining({ title: "Edited" }) })));
   });
 
+  it("saves only the newest raw CUE preview when validations resolve out of order", async () => {
+    let resolveFirst!: (value: Awaited<ReturnType<typeof window.musicId3.previewCue>>) => void;
+    let resolveSecond!: (value: Awaited<ReturnType<typeof window.musicId3.previewCue>>) => void;
+    vi.mocked(window.musicId3.previewCue)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+    const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: 'TITLE "Album"', parsed: { title: "Album", remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /^raw$/i }));
+    const textarea = screen.getByLabelText(/raw cue/i);
+    fireEvent.change(textarea, { target: { value: 'TITLE "First"' } }); fireEvent.blur(textarea);
+    fireEvent.change(textarea, { target: { value: 'TITLE "Second"' } }); fireEvent.blur(textarea);
+    resolveSecond({ ...cue, rawText: 'TITLE "Second"', parsed: { ...cue.parsed, title: "Second" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /save cue/i })).toBeEnabled());
+    resolveFirst({ ...cue, rawText: 'TITLE "First"', parsed: { ...cue.parsed, title: "First" } });
+    await Promise.resolve();
+    fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
+    await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ rawText: 'TITLE "Second"', document: expect.objectContaining({ title: "Second" }) })));
+  });
+
   it("mutates structured CUE fields in the saved document", async () => {
     render(<App />); const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: 'TITLE "Album"', parsed: { title: "Album", remarks: [], files: [{ path: "old.flac" }], tracks: [{ number: 1, title: "Old track", indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] }; fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.change(screen.getByLabelText(/cue album title/i), { target: { value: "Edited album" } }); fireEvent.change(screen.getByLabelText(/cue file 1/i), { target: { value: "new.flac" } }); fireEvent.change(screen.getByLabelText(/track 1 title/i), { target: { value: "Edited track" } }); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ rawText: "", document: expect.objectContaining({ title: "Edited album", files: [expect.objectContaining({ path: "new.flac" })], tracks: [expect.objectContaining({ title: "Edited track" })] }) })));
@@ -156,5 +228,20 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.getProviderCookieStatus).mockResolvedValue("configured"); vi.mocked(window.musicId3.searchMetadata).mockRejectedValue(new Error("secret should not render")); vi.mocked(window.musicId3.clearOnlineCache).mockRejectedValue(new Error("cache internals"));
     render(<App />); expect(await screen.findByLabelText(/cookie status/i)).toHaveTextContent("configured"); fireEvent.click(screen.getByText("Settings")); fireEvent.click(screen.getByRole("button", { name: /clear online cache/i })); expect(await screen.findByText(/unable to clear online cache/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "query" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); expect((await screen.findAllByText(/metadata search failed/i)).length).toBeGreaterThan(0); expect(screen.queryByText(/secret should not render/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps Cookie configuration status separate from connectivity results", async () => {
+    vi.mocked(window.musicId3.getProviderCookieStatus).mockResolvedValue("configured");
+    vi.mocked(window.musicId3.testProviderCookie).mockResolvedValue({ ok: false, error: "Provider connectivity check failed" });
+    render(<App />); fireEvent.click(screen.getByText("Settings"));
+    expect(await screen.findByLabelText(/cookie status/i)).toHaveTextContent("configured");
+    fireEvent.click(screen.getByRole("button", { name: /^test$/i }));
+    expect(await screen.findByText(/provider connectivity check failed/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/cookie status/i)).toHaveTextContent("configured");
+
+    vi.mocked(window.musicId3.getProviderCookieStatus).mockResolvedValue("unconfigured");
+    fireEvent.click(screen.getByRole("button", { name: /^clear$/i }));
+    await waitFor(() => expect(window.musicId3.getProviderCookieStatus).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText(/cookie status/i)).toHaveTextContent("unconfigured");
   });
 });

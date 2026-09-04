@@ -45,8 +45,8 @@ export function isIpcChannel(channel: string): channel is IpcChannel {
 
 export type MusicId3Api = {
   selectDirectory(): Promise<string | undefined>;
-  scanDirectory(path: string): Promise<ScanStarted>;
-  cancelScan(scanId: string): Promise<void>;
+  scanDirectory(path: string, requestId: string): Promise<ScanStarted>;
+  cancelScan(requestId: string): Promise<void>;
   readAudio(path: string): Promise<AudioMetadata>;
   writeAudio(path: string, patch: MetadataPatch): Promise<WriteResult>;
   readCue(path: string): Promise<CueDocumentState>;

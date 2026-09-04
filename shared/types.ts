@@ -138,10 +138,12 @@ export type MetadataCandidate = {
   ctdb?: { status: "match" | "no-match" | "unavailable"; confidence?: number };
   confidence: "high" | "medium" | "low";
   evidence?: string[];
+  warnings?: string[];
 };
 
 export type ScanStarted = {
   ok: true;
+  requestId: string;
   scanId: string;
 };
 
@@ -165,6 +167,7 @@ export type CookieTestResult =
   | { ok: false; error: string };
 
 export type ScanProgress = {
+  requestId?: string;
   scanId: string;
   item?: LibraryItem;
   scannedCount: number;

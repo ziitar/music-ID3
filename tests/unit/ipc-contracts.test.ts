@@ -123,6 +123,22 @@ describe("IPC contracts", () => {
     });
   });
 
+  it("returns candidate details with a cover-specific warning when cover loading fails", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const details = { id: "release", source: "musicbrainz" as const, title: "Release", date: "2026", confidence: "high" as const };
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      metadataAdapters: { musicbrainz: { search: async () => [], getDetails: async () => details, getCover: async () => { throw new Error("private CDN failure"); } } }
+    });
+
+    await expect(handlers.get(ipcChannels.getMetadataCandidate)?.({}, "musicbrainz", "release")).resolves.toEqual({
+      ...details,
+      warnings: ["Cover art unavailable"]
+    });
+  });
+
   it("starts a scan and publishes typed progress only to the invoking renderer", async () => {
     const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
     const root = await createTempDir();
@@ -148,10 +164,10 @@ describe("IPC contracts", () => {
           }
         }
       }
-    }, root);
+    }, root, "renderer-request");
     await completed;
 
-    expect(started).toEqual({ ok: true, scanId: expect.any(String) });
+    expect(started).toEqual({ ok: true, requestId: "renderer-request", scanId: expect.any(String) });
     expect(progress).toEqual([
       expect.objectContaining({ phase: "complete", scannedCount: 0, scanId: (started as { scanId: string }).scanId })
     ]);
@@ -164,10 +180,25 @@ describe("IPC contracts", () => {
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const progress: unknown[] = [];
     registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
-    const started = await handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: (_channel: string, payload: unknown) => progress.push(payload) } }, "D:/Music") as { scanId: string };
-    await handlers.get(ipcChannels.cancelScan)?.({}, started.scanId);
+    const started = await handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: (_channel: string, payload: unknown) => progress.push(payload) } }, "D:/Music", "renderer-request") as { scanId: string };
+    await handlers.get(ipcChannels.cancelScan)?.({}, "renderer-request");
     expect(signal?.aborted).toBe(true); release(); await Promise.resolve(); await Promise.resolve();
     expect(progress).toEqual([]);
+  });
+
+  it("registers scan ownership under the renderer request ID before scanning begins", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    let signal: AbortSignal | undefined;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
+
+    const started = handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: () => undefined } }, "D:/Music", "renderer-request") as { requestId: string };
+    await handlers.get(ipcChannels.cancelScan)?.({}, "renderer-request");
+
+    expect(started).toMatchObject({ ok: true, requestId: "renderer-request" });
+    expect(signal?.aborted).toBe(true);
+    release();
   });
 
   it("reads and saves CUE files through the concrete allow-listed handlers", async () => {
