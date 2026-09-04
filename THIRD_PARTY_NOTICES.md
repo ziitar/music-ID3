@@ -21,9 +21,11 @@ stop working.
   keeps only the EAPI search and WEAPI song-detail request-envelope construction,
   maps provider JSON to the application's metadata contract, derives cover
   requests from returned album image URLs, and injects the encrypted-at-rest
-  Cookie only at request time. The cryptographic operations were rewritten with
-  Node's built-in `crypto` module; the upstream server and proxy framework are
-  not copied.
+  Cookie only at request time. Each EAPI attempt derives its outgoing Cookie
+  from the same encoded header fields included in the encrypted request while
+  retaining the stored user-authentication tokens. The cryptographic operations
+  were rewritten with Node's built-in `crypto` module; the upstream server and
+  proxy framework are not copied.
 - Copyright: Copyright (c) 2013-2022 Binaryify and contributors.
 
 ## QQ Music API

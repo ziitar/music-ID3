@@ -55,18 +55,19 @@ export function createCtdbAdapter(options: { http: HttpClient }): CtdbAdapter {
           headers: { "User-Agent": "MusicID3Desktop/1.0 (https://github.com/uziit/music-ID3)" }
         });
         const xml = new TextDecoder().decode(document.data);
-        if (/\bnentries=["']0["']/i.test(xml) || /<error[^>]*>.*not found/is.test(xml)) {
+        const validDocument = /^\s*(?:<\?xml\b[^>]*>\s*)?<ctdb\b[^>]*(?:\/\s*>|>[\s\S]*<\/ctdb\s*>)\s*$/i.test(xml);
+        if (validDocument && /<ctdb\b[^>]*\bnentries=["']0["']/i.test(xml)) {
           return { status: "no-match", evidence: ["CTDB returned no matching pressing"] };
         }
         const confidence = Number.parseInt(xml.match(/\bconfidence=["'](\d+)["']/i)?.[1] ?? "", 10);
-        if (/<entry\b/i.test(xml) || /\bnentries=["'][1-9]\d*["']/i.test(xml)) {
+        if (validDocument && (/<entry\b/i.test(xml) || /<ctdb\b[^>]*\bnentries=["'][1-9]\d*["']/i.test(xml))) {
           return {
             status: "match",
             ...(Number.isFinite(confidence) ? { confidence } : {}),
             evidence: ["CTDB verified the pressing"]
           };
         }
-        return { status: "no-match", evidence: ["CTDB returned no matching pressing"] };
+        return { status: "unavailable", error: "CTDB returned an invalid response", evidence: [] };
       } catch (error) {
         if (isAbortError(error)) throw error;
         if (error instanceof HttpRequestError && error.status === 404) {

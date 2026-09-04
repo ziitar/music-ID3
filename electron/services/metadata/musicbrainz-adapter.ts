@@ -34,6 +34,26 @@ type MusicBrainzRelease = {
 const musicBrainzBase = "https://musicbrainz.org/ws/2";
 const coverArtBase = "https://coverartarchive.org";
 const defaultUserAgent = "MusicID3Desktop/1.0 (https://github.com/uziit/music-ID3)";
+const coverMaxBytes = 20 * 1024 * 1024;
+
+function isSafeCoverUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLocaleLowerCase("en-US");
+    return url.protocol === "https:" && url.port === "" && url.username === "" && url.password === "" && (
+      host === "coverartarchive.org" ||
+      host === "archive.org" ||
+      host.endsWith(".archive.org")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function safeCoverUrl(value: string): string {
+  if (!isSafeCoverUrl(value)) throw new TypeError("Invalid Cover Art Archive cover URL");
+  return new URL(value).toString();
+}
 
 function creditName(credits: ArtistCredit | undefined): string | undefined {
   if (!credits?.length) return undefined;
@@ -113,7 +133,13 @@ export function createMusicBrainzAdapter(options: { http: HttpClient; userAgent?
         const front = listing.images?.find((image) => image.front && image.approved !== false);
         const coverUrl = front?.thumbnails?.["500"] ?? front?.thumbnails?.large ?? front?.image;
         if (!coverUrl) return undefined;
-        const cover = await options.http.getBytes("musicbrainz", coverUrl, { headers, cacheTtlMs });
+        const cover = await options.http.getBytes("musicbrainz", safeCoverUrl(coverUrl), {
+          headers,
+          cacheTtlMs,
+          cacheKey: `musicbrainz:cover:${coverUrl}`,
+          maxResponseBytes: coverMaxBytes,
+          validateRedirectUrl: isSafeCoverUrl
+        });
         return { mimeType: cover.mimeType, data: Buffer.from(cover.data).toString("base64") };
       } catch (error) {
         if (error instanceof HttpRequestError && error.status === 404) return undefined;

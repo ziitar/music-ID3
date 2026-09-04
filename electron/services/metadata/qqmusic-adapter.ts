@@ -44,12 +44,20 @@ function coverUrl(albumMid: string | undefined): string | undefined {
   return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg?max_age=2592000` : undefined;
 }
 
+function isSafeCoverUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.port === "" && url.username === "" && url.password === "" && url.hostname.toLocaleLowerCase("en-US") === "y.gtimg.cn";
+  } catch {
+    return false;
+  }
+}
+
 function safeCoverUrl(value: string): string {
-  const url = new URL(value);
-  if (url.protocol !== "https:" || url.hostname.toLocaleLowerCase("en-US") !== "y.gtimg.cn") {
+  if (!isSafeCoverUrl(value)) {
     throw new TypeError("Invalid QQ Music cover URL");
   }
-  return url.toString();
+  return new URL(value).toString();
 }
 
 function mapSong(song: QqSong): MetadataCandidate {
@@ -72,12 +80,19 @@ export function createQqMusicAdapter(options: {
   http: HttpClient;
   cookieStore: Pick<CookieStore, "get">;
 }): MetadataAdapter {
-  function requestOptions(cookie: string | undefined, headers: Record<string, string>, cacheKey: string): HttpRequestOptions {
+  function requestOptions(
+    cacheKey: string,
+    prepare: (cookie: string | undefined) => { url: string; headers: Record<string, string> }
+  ): HttpRequestOptions {
     return {
-      headers: {
-        Accept: "application/json",
-        ...headers,
-        ...(cookie ? { Cookie: cookie } : {})
+      headers: { Accept: "application/json" },
+      prepareRequest: async () => {
+        const cookie = await options.cookieStore.get("qq");
+        const prepared = prepare(cookie);
+        return {
+          ...prepared,
+          headers: { ...prepared.headers, ...(cookie ? { Cookie: cookie } : {}) }
+        };
       },
       cacheTtlMs: sessionCacheTtlMs,
       cacheKey
@@ -85,26 +100,31 @@ export function createQqMusicAdapter(options: {
   }
 
   async function search(query: string): Promise<MetadataCandidate[]> {
-    const cookie = await options.cookieStore.get("qq");
-    const params = new URLSearchParams({
-      ...commonParams(cookie),
-      w: query,
-      format: "json",
-      ct: "24",
-      qqmusic_ver: "1298",
-      remoteplace: "txt.yqq.song",
-      t: "0",
-      aggr: "1",
-      cr: "1",
-      lossless: "0",
-      flag_qc: "0"
-    });
+    const baseUrl = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp";
     const result = await options.http.getJson<{
       data?: { song?: { list?: QqSong[] }; songlist?: QqSong[] };
-    }>("qq", `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?${params}`, requestOptions(cookie, {
-      Referer: "https://c.y.qq.com/",
-      Host: "c.y.qq.com"
-    }, `qq:search:${query}`));
+    }>("qq", baseUrl, requestOptions(`qq:search:${query}`, (cookie) => {
+      const params = new URLSearchParams({
+        ...commonParams(cookie),
+        w: query,
+        format: "json",
+        ct: "24",
+        qqmusic_ver: "1298",
+        remoteplace: "txt.yqq.song",
+        t: "0",
+        aggr: "1",
+        cr: "1",
+        lossless: "0",
+        flag_qc: "0",
+        n: "10",
+        p: "1",
+        catZhida: "1"
+      });
+      return {
+        url: `${baseUrl}?${params}`,
+        headers: { Referer: "https://c.y.qq.com/", Host: "c.y.qq.com" }
+      };
+    }));
     return (result.data?.song?.list ?? result.data?.songlist ?? []).map(mapSong);
   }
 
@@ -112,7 +132,6 @@ export function createQqMusicAdapter(options: {
     search,
 
     async getDetails(id) {
-      const cookie = await options.cookieStore.get("qq");
       const data = JSON.stringify({
         comm: { ct: 24, cv: 0 },
         songinfo: {
@@ -121,18 +140,20 @@ export function createQqMusicAdapter(options: {
           module: "music.pf_song_detail_svr"
         }
       });
-      const params = new URLSearchParams({
-        ...commonParams(cookie),
-        format: "json",
-        data
-      });
+      const baseUrl = "https://u.y.qq.com/cgi-bin/musicu.fcg";
       const result = await options.http.getJson<{
         songinfo?: { data?: { track_info: QqSong } | QqSong };
-      }>("qq", `https://u.y.qq.com/cgi-bin/musicu.fcg?${params}`, requestOptions(cookie, {
-        Referer: "https://y.qq.com/portal/player.html",
-        Host: "u.y.qq.com",
-        "Content-Type": "application/x-www-form-urlencoded"
-      }, `qq:details:${id}`));
+      }>("qq", baseUrl, requestOptions(`qq:details:${id}`, (cookie) => {
+        const params = new URLSearchParams({ ...commonParams(cookie), format: "json", data });
+        return {
+          url: `${baseUrl}?${params}`,
+          headers: {
+            Referer: "https://y.qq.com/portal/player.html",
+            Host: "u.y.qq.com",
+            "Content-Type": "application/x-www-form-urlencoded"
+          }
+        };
+      }));
       const dataResult = result.songinfo?.data;
       const song = dataResult && "track_info" in dataResult ? dataResult.track_info : dataResult;
       if (!song) throw new Error("QQ Music returned no song details");
@@ -145,7 +166,8 @@ export function createQqMusicAdapter(options: {
         headers: { Accept: "image/*", Referer: "https://y.qq.com/" },
         maxResponseBytes: coverMaxBytes,
         cacheTtlMs: sessionCacheTtlMs,
-        cacheKey: `qq:cover:${candidate.coverUrl}`
+        cacheKey: `qq:cover:${candidate.coverUrl}`,
+        validateRedirectUrl: isSafeCoverUrl
       });
       return { mimeType: result.mimeType, data: Buffer.from(result.data).toString("base64") };
     },

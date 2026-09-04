@@ -3,7 +3,21 @@
     "url": "https://interfacepc.music.163.com/eapi/search/get",
     "method": "POST",
     "cryptoPath": "/api/search/get",
-    "fields": { "s": "Mystery of Love", "type": 1, "limit": 30, "offset": 0, "e_r": false }
+    "fields": { "s": "Mystery of Love", "type": 1, "limit": 30, "offset": 0, "e_r": false },
+    "cookieFields": {
+      "osver": "Microsoft-Windows-10-Professional-build-19045-64bit",
+      "deviceId": "",
+      "os": "pc",
+      "appver": "3.1.17.204416",
+      "versioncode": "140",
+      "mobilename": "",
+      "buildver": "1700000000",
+      "resolution": "1920x1080",
+      "__csrf": "",
+      "channel": "netease",
+      "requestId": "1700000000123_0001",
+      "MUSIC_U": "first-secret"
+    }
   },
   "detail": {
     "url": "https://music.163.com/weapi/v3/song/detail",

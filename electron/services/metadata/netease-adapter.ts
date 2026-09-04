@@ -55,12 +55,26 @@ function cookieValues(cookie: string | undefined): Record<string, string> {
   }));
 }
 
+function headerCookie(header: Record<string, string>): string {
+  return Object.entries(header)
+    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
+    .join("; ");
+}
+
+function isSafeCoverUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.port === "" && url.username === "" && url.password === "" && /^p\d+\.music\.126\.net$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function safeCoverUrl(value: string): string {
-  const url = new URL(value);
-  if (url.protocol !== "https:" || !/^p\d+\.music\.126\.net$/i.test(url.hostname)) {
+  if (!isSafeCoverUrl(value)) {
     throw new TypeError("Invalid NetEase cover URL");
   }
-  return url.toString();
+  return new URL(value).toString();
 }
 
 function mapSong(song: NeteaseSong): MetadataCandidate {
@@ -89,26 +103,6 @@ export function createNeteaseAdapter(options: {
   const randomBytes = options.randomBytes ?? nodeRandomBytes;
 
   async function search(query: string): Promise<MetadataCandidate[]> {
-    const cookie = await options.cookieStore.get("netease");
-    const values = cookieValues(cookie);
-    const timestamp = now();
-    const header = {
-      osver: values.osver ?? "Microsoft-Windows-10-Professional-build-19045-64bit",
-      deviceId: values.deviceId ?? "",
-      os: values.os ?? "pc",
-      appver: values.appver ?? "3.1.17.204416",
-      versioncode: values.versioncode ?? "140",
-      buildver: values.buildver ?? String(timestamp).slice(0, 10),
-      resolution: values.resolution ?? "1920x1080",
-      __csrf: values.__csrf ?? "",
-      channel: values.channel ?? "netease",
-      requestId: `${timestamp}_${String(randomBytes(2).readUInt16BE() % 1000).padStart(4, "0")}`,
-      ...(values.MUSIC_U ? { MUSIC_U: values.MUSIC_U } : {}),
-      ...(values.MUSIC_A ? { MUSIC_A: values.MUSIC_A } : {}),
-      ...(values.NMTID ? { NMTID: values.NMTID } : {})
-    };
-    const data = { s: query, type: 1, limit: 30, offset: 0, e_r: false, header };
-    const body = new URLSearchParams({ params: encryptEapi("/api/search/get", data) });
     const result = await options.http.postJson<{ result?: { songs?: NeteaseSong[] } }>(
       "netease",
       `${eapiDomain}/eapi/search/get`,
@@ -116,10 +110,39 @@ export function createNeteaseAdapter(options: {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-          "User-Agent": "NeteaseMusic/9.0.90/5038 (iPhone; iOS 16.2; zh_CN)",
-          ...(cookie ? { Cookie: cookie } : {})
+          "User-Agent": "NeteaseMusic/9.0.90/5038 (iPhone; iOS 16.2; zh_CN)"
         },
-        body: body.toString(),
+        prepareRequest: async () => {
+          const values = cookieValues(await options.cookieStore.get("netease"));
+          const timestamp = now();
+          const header: Record<string, string> = {
+            osver: values.osver ?? "Microsoft-Windows-10-Professional-build-19045-64bit",
+            deviceId: values.deviceId ?? "",
+            os: values.os ?? "pc",
+            appver: values.appver ?? "3.1.17.204416",
+            versioncode: values.versioncode ?? "140",
+            mobilename: values.mobilename ?? "",
+            buildver: values.buildver ?? String(timestamp).slice(0, 10),
+            resolution: values.resolution ?? "1920x1080",
+            __csrf: values.__csrf ?? "",
+            channel: values.channel ?? "netease",
+            requestId: `${timestamp}_${String(randomBytes(2).readUInt16BE() % 1000).padStart(4, "0")}`,
+            ...(values.MUSIC_U ? { MUSIC_U: values.MUSIC_U } : {}),
+            ...(values.MUSIC_A ? { MUSIC_A: values.MUSIC_A } : {}),
+            ...(values.NMTID ? { NMTID: values.NMTID } : {})
+          };
+          const data = { s: query, type: 1, limit: 30, offset: 0, e_r: false, header };
+          const authCookie = headerCookie(Object.fromEntries(
+            ["__csrf", "MUSIC_U", "MUSIC_A", "NMTID"]
+              .filter((name) => header[name] !== undefined)
+              .map((name) => [name, header[name]])
+          ));
+          return {
+            headers: { Cookie: headerCookie(header) },
+            body: new URLSearchParams({ params: encryptEapi("/api/search/get", data) }).toString(),
+            cacheIdentityHeaders: { Cookie: authCookie }
+          };
+        },
         cacheTtlMs: sessionCacheTtlMs,
         cacheKey: `netease:search:${query}`
       }
@@ -131,10 +154,6 @@ export function createNeteaseAdapter(options: {
     search,
 
     async getDetails(id) {
-      const cookie = await options.cookieStore.get("netease");
-      const c = JSON.stringify([{ id: Number.isFinite(Number(id)) ? Number(id) : id }]);
-      const encrypted = encryptWeapi({ c, e_r: false, csrf_token: cookieValues(cookie).__csrf ?? "" }, randomBytes);
-      const body = new URLSearchParams(encrypted);
       const result = await options.http.postJson<{ songs?: NeteaseSong[] }>(
         "netease",
         `${musicDomain}/weapi/v3/song/detail`,
@@ -143,10 +162,19 @@ export function createNeteaseAdapter(options: {
             Accept: "application/json",
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
             Referer: musicDomain,
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-            ...(cookie ? { Cookie: cookie } : {})
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
           },
-          body: body.toString(),
+          prepareRequest: async () => {
+            const cookie = await options.cookieStore.get("netease");
+            const c = JSON.stringify([{ id: Number.isFinite(Number(id)) ? Number(id) : id }]);
+            const encrypted = encryptWeapi({ c, e_r: false, csrf_token: cookieValues(cookie).__csrf ?? "" }, randomBytes);
+            const requestHeaders: Record<string, string> = {};
+            if (cookie) requestHeaders.Cookie = cookie;
+            return {
+              headers: requestHeaders,
+              body: new URLSearchParams(encrypted).toString()
+            };
+          },
           cacheTtlMs: sessionCacheTtlMs,
           cacheKey: `netease:details:${id}`
         }
@@ -162,7 +190,8 @@ export function createNeteaseAdapter(options: {
         headers: { Accept: "image/*", Referer: "https://music.163.com/" },
         maxResponseBytes: coverMaxBytes,
         cacheTtlMs: sessionCacheTtlMs,
-        cacheKey: `netease:cover:${candidate.coverUrl}`
+        cacheKey: `netease:cover:${candidate.coverUrl}`,
+        validateRedirectUrl: isSafeCoverUrl
       });
       return { mimeType: result.mimeType, data: Buffer.from(result.data).toString("base64") };
     },

@@ -9,6 +9,7 @@ import { scoreCandidate, type MetadataAdapter } from "../../electron/services/me
 import { createCtdbAdapter, toCtdbToc } from "../../electron/services/metadata/ctdb-adapter";
 import {
   createHttpClient,
+  createElectronTransport,
   HttpRequestError,
   type HttpTransport,
   type HttpTransportRequest,
@@ -70,6 +71,13 @@ function decryptEapi(params: string): { path: string; data: Record<string, unkno
 function decryptWeapi(params: string, secretKey: string): Record<string, unknown> {
   const firstLayer = decryptAes(params, "base64", "cbc", secretKey);
   return JSON.parse(decryptAes(firstLayer, "base64", "cbc", "0CoJUm6Qyw8W8jud")) as Record<string, unknown>;
+}
+
+function parseCookie(value: string | undefined): Record<string, string> {
+  return Object.fromEntries((value ?? "").split(";").map((part) => part.trim()).filter(Boolean).map((part) => {
+    const separator = part.indexOf("=");
+    return [decodeURIComponent(part.slice(0, separator)), decodeURIComponent(part.slice(separator + 1))];
+  }));
 }
 
 describe("metadata adapters", () => {
@@ -176,12 +184,31 @@ describe("metadata adapters", () => {
     await expect(invalid.validate("0:13350:26850")).rejects.toMatchObject({ name: "HttpRequestError", status: 400 });
   });
 
+  it("treats only a valid CTDB zero-entry document as no-match", async () => {
+    const valid = createCtdbAdapter({
+      http: clientFor(queueTransport([response('<?xml version="1.0"?><ctdb status="ok" nentries="0" />')]).transport)
+    });
+    await expect(valid.validate("0:13350:26850")).resolves.toEqual({
+      status: "no-match",
+      evidence: ["CTDB returned no matching pressing"]
+    });
+
+    for (const body of ["", "<html>upstream error</html>", '<ctdb status="ok">']) {
+      const malformed = createCtdbAdapter({ http: clientFor(queueTransport([response(body)]).transport) });
+      await expect(malformed.validate("0:13350:26850")).resolves.toEqual({
+        status: "unavailable",
+        error: "CTDB returned an invalid response",
+        evidence: []
+      });
+    }
+  });
+
   it("maps NetEase search/detail fixtures and obtains the current Cookie for every request", async () => {
     const queued = queueTransport([
       response(await fixture("netease-search.json")),
       response(await fixture("netease-detail.json"))
     ]);
-    let cookie = "MUSIC_U=first-secret";
+    let cookie = "MUSIC_U=first-secret; ignored=must-not-forward";
     const adapter = createNeteaseAdapter({
       http: clientFor(queued.transport),
       cookieStore: { get: async () => cookie },
@@ -203,14 +230,11 @@ describe("metadata adapters", () => {
     cookie = "MUSIC_U=rotated-secret; __csrf=csrf-value";
     const details = await adapter.getDetails("1859245776");
     expect(details).toMatchObject({ title: "Mystery of Love", totalDurationMs: 248000 });
-    expect(queued.requests.map((request) => request.headers.Cookie)).toEqual([
-      "MUSIC_U=first-secret",
-      "MUSIC_U=rotated-secret; __csrf=csrf-value"
-    ]);
+    expect(queued.requests[1].headers.Cookie).toBe("MUSIC_U=rotated-secret; __csrf=csrf-value");
     expect(JSON.stringify(details)).not.toContain("secret");
 
     const expected = JSON.parse(await fixture("netease-request-shapes.json")) as {
-      search: { url: string; method: string; cryptoPath: string; fields: Record<string, unknown> };
+      search: { url: string; method: string; cryptoPath: string; fields: Record<string, unknown>; cookieFields: Record<string, string> };
       detail: { url: string; method: string; fields: Record<string, unknown> };
     };
     expect(queued.requests[0]).toMatchObject({ url: expected.search.url, method: expected.search.method });
@@ -218,6 +242,7 @@ describe("metadata adapters", () => {
     const decryptedSearch = decryptEapi(eapiBody.get("params") ?? "");
     expect(decryptedSearch.path).toBe(expected.search.cryptoPath);
     expect(decryptedSearch.data).toMatchObject(expected.search.fields);
+    expect(parseCookie(queued.requests[0].headers.Cookie)).toEqual(expected.search.cookieFields);
 
     expect(queued.requests[1]).toMatchObject({ url: expected.detail.url, method: expected.detail.method });
     const weapiBody = new URLSearchParams(queued.requests[1].body as string);
@@ -240,6 +265,56 @@ describe("metadata adapters", () => {
     cookie = "MUSIC_U=rotated";
     await expect(adapter.search("cache-key")).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ title: "Rotated Result" })]));
     expect(queued.requests).toHaveLength(2);
+  });
+
+  it("rebuilds NetEase and QQ authenticated requests with the current Cookie on retry", async () => {
+    const neteaseRequests: HttpTransportRequest[] = [];
+    let neteaseCookieRead = 0;
+    const netease = createNeteaseAdapter({
+      http: createHttpClient({
+        transport: async (request) => {
+          neteaseRequests.push(request);
+          if (neteaseRequests.length === 1) throw new TypeError("retry");
+          return response(await fixture("netease-search.json"));
+        },
+        policies: { netease: { minIntervalMs: 0, retries: 1 } }
+      }),
+      cookieStore: {
+        get: async () => ++neteaseCookieRead === 1
+          ? "MUSIC_U=first; __csrf=first-csrf"
+          : "MUSIC_U=second; __csrf=second-csrf"
+      },
+      now: () => 1700000000123,
+      randomBytes: (size: number) => Buffer.alloc(size, 1)
+    });
+    await netease.search("retry");
+    expect(neteaseCookieRead).toBe(2);
+    expect(neteaseRequests.map((request) => parseCookie(request.headers.Cookie).MUSIC_U)).toEqual(["first", "second"]);
+    expect(neteaseRequests.map((request) => (decryptEapi(new URLSearchParams(request.body as string).get("params") ?? "").data.header as Record<string, string>).__csrf)).toEqual([
+      "first-csrf",
+      "second-csrf"
+    ]);
+
+    const qqRequests: HttpTransportRequest[] = [];
+    let qqCookieRead = 0;
+    const qq = createQqMusicAdapter({
+      http: createHttpClient({
+        transport: async (request) => {
+          qqRequests.push(request);
+          if (qqRequests.length === 1) throw new TypeError("retry");
+          return response(await fixture("qq-search.json"));
+        },
+        policies: { qq: { minIntervalMs: 0, retries: 1 } }
+      }),
+      cookieStore: { get: async () => `uin=${++qqCookieRead}; qm_keyst=secret-${qqCookieRead}` }
+    });
+    await qq.search("retry");
+    expect(qqCookieRead).toBe(2);
+    expect(qqRequests.map((request) => request.headers.Cookie)).toEqual([
+      "uin=1; qm_keyst=secret-1",
+      "uin=2; qm_keyst=secret-2"
+    ]);
+    expect(qqRequests.map((request) => new URL(request.url).searchParams.get("loginUin"))).toEqual(["1", "2"]);
   });
 
   it("maps QQ search/detail fixtures and derives the upstream album-cover URL", async () => {
@@ -277,7 +352,7 @@ describe("metadata adapters", () => {
     }>;
     const searchUrl = new URL(queued.requests[0].url);
     const detailUrl = new URL(queued.requests[1].url);
-    expect(Object.fromEntries(Object.keys(expected.search.params).map((key) => [key, searchUrl.searchParams.get(key)]))).toEqual(expected.search.params);
+    expect(Object.fromEntries(searchUrl.searchParams)).toEqual(expected.search.params);
     expect(queued.requests[0].headers).toMatchObject({ Host: expected.search.host, Referer: expected.search.referer });
     expect(Object.fromEntries(Object.keys(expected.detail.params).map((key) => [key, detailUrl.searchParams.get(key)]))).toEqual(expected.detail.params);
     expect(queued.requests[1].headers).toMatchObject({
@@ -339,11 +414,138 @@ describe("metadata adapters", () => {
       confidence: "low",
       coverUrl: "http://p1.music.126.net/insecure.jpg"
     })).rejects.toThrow(/cover URL/i);
+    await expect(qq.getCover({
+      id: "4",
+      source: "qq",
+      title: "Four",
+      confidence: "low",
+      coverUrl: "https://y.gtimg.cn:444/alternate-service.jpg"
+    })).rejects.toThrow(/cover URL/i);
+    await expect(netease.getCover({
+      id: "5",
+      source: "netease",
+      title: "Five",
+      confidence: "low",
+      coverUrl: "https://p1.music.126.net:444/alternate-service.jpg"
+    })).rejects.toThrow(/cover URL/i);
     expect(blockedQueue.requests).toHaveLength(0);
+  });
+
+  it("rejects arbitrary Cover Art Archive image URLs before image transport", async () => {
+    const queued = queueTransport([response(JSON.stringify({ images: [
+      { front: true, approved: true, image: "https://attacker.invalid/cover.jpg" }
+    ] }))]);
+    const adapter = createMusicBrainzAdapter({ http: clientFor(queued.transport) });
+
+    await expect(adapter.getCover({ id: "release-id" } as MetadataCandidate)).rejects.toThrow(/cover URL/i);
+    expect(queued.requests).toHaveLength(1);
+
+    const alternatePortQueue = queueTransport([response(JSON.stringify({ images: [
+      { front: true, approved: true, image: "https://coverartarchive.org:444/release/id/front.jpg" }
+    ] }))]);
+    const alternatePort = createMusicBrainzAdapter({ http: clientFor(alternatePortQueue.transport) });
+    await expect(alternatePort.getCover({ id: "release-id" } as MetadataCandidate)).rejects.toThrow(/cover URL/i);
+    expect(alternatePortQueue.requests).toHaveLength(1);
   });
 });
 
 describe("main-process HTTP client", () => {
+  it("streams Electron responses and cancels absent or dishonest-length bodies at the byte cap", async () => {
+    for (const headers of [new Headers(), new Headers({ "content-length": "2" })]) {
+      let cancelled = false;
+      let arrayBufferCalls = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Uint8Array.from([1, 2, 3, 4, 5, 6]));
+          controller.enqueue(Uint8Array.from([7, 8, 9, 10, 11, 12]));
+        },
+        cancel() {
+          cancelled = true;
+        }
+      });
+      const transport = createElectronTransport({
+        fetch: async () => ({
+          status: 200,
+          headers,
+          body,
+          arrayBuffer: async () => {
+            arrayBufferCalls += 1;
+            return new ArrayBuffer(12);
+          }
+        }) as Response
+      });
+
+      await expect(transport({
+        url: "https://example.test/chunked",
+        method: "GET",
+        headers: {},
+        signal: new AbortController().signal,
+        maxResponseBytes: 10
+      })).rejects.toThrow(/size limit/i);
+      expect(cancelled).toBe(true);
+      expect(arrayBufferCalls).toBe(0);
+    }
+  });
+
+  it("blocks unvalidated Electron redirects before following them", async () => {
+    const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const transport = createElectronTransport({
+      fetch: async (input, init) => {
+        fetches.push({ url: String(input), init });
+        return new Response(null, { status: 302, headers: { location: "https://attacker.invalid/cover.jpg" } });
+      }
+    });
+
+    await expect(transport({
+      url: "https://coverartarchive.org/release/id/front-500",
+      method: "GET",
+      headers: { Cookie: "must-not-forward" },
+      signal: new AbortController().signal,
+      maxResponseBytes: 1024,
+      validateRedirectUrl: (url) => new URL(url).hostname.endsWith("archive.org")
+    })).rejects.toThrow(/redirect target/i);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0].init).toMatchObject({ redirect: "manual", credentials: "omit" });
+    expect(fetches[0].init?.headers).toEqual({});
+  });
+
+  it("follows a validated cover redirect manually without credentials", async () => {
+    const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const transport = createElectronTransport({
+      fetch: async (input, init) => {
+        fetches.push({ url: String(input), init });
+        if (fetches.length === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://ia801.example.us.archive.org/download/mbid/cover.jpg" }
+          });
+        }
+        return new Response(Uint8Array.from([1, 2, 3]), { status: 200, headers: { "content-type": "image/jpeg" } });
+      }
+    });
+
+    await expect(transport({
+      url: "https://coverartarchive.org/release/id/front-500",
+      method: "GET",
+      headers: { Accept: "image/*", Authorization: "must-not-forward", Cookie: "must-not-forward" },
+      signal: new AbortController().signal,
+      maxResponseBytes: 1024,
+      validateRedirectUrl: (value) => {
+        const url = new URL(value);
+        return url.protocol === "https:" && (url.hostname === "coverartarchive.org" || url.hostname.endsWith(".archive.org"));
+      }
+    })).resolves.toEqual({
+      status: 200,
+      headers: { "content-type": "image/jpeg" },
+      body: Uint8Array.from([1, 2, 3])
+    });
+    expect(fetches.map((entry) => entry.url)).toEqual([
+      "https://coverartarchive.org/release/id/front-500",
+      "https://ia801.example.us.archive.org/download/mbid/cover.jpg"
+    ]);
+    expect(fetches.every((entry) => JSON.stringify(entry.init?.headers) === JSON.stringify({ Accept: "image/*" }))).toBe(true);
+  });
+
   it("caches session responses and rate-limits requests per provider", async () => {
     let now = 1000;
     const waits: number[] = [];
@@ -450,6 +652,46 @@ describe("main-process HTTP client", () => {
       name: "AbortError"
     });
     expect(attempts).toBe(1);
+  });
+
+  it("applies caller cancellation and timeout while resolving headers and waiting for a rate slot", async () => {
+    const never = new Promise<Record<string, string>>(() => undefined);
+    const headerClient = createHttpClient({
+      transport: async () => response("{}"),
+      defaultTimeoutMs: 10,
+      policies: { qq: { minIntervalMs: 0, retries: 0 } }
+    });
+    const timedHeader = headerClient.getJson("qq", "https://example.test/headers", { getHeaders: async () => never });
+    await expect(Promise.race([
+      timedHeader,
+      new Promise((resolve) => setTimeout(() => resolve("still pending"), 100))
+    ])).rejects.toThrow(/timed out/i);
+
+    const controller = new AbortController();
+    const cancelledHeader = headerClient.getJson("qq", "https://example.test/cancelled-headers", { signal: controller.signal, getHeaders: async () => never });
+    controller.abort();
+    await expect(Promise.race([
+      cancelledHeader,
+      new Promise((resolve) => setTimeout(() => resolve("still pending"), 100))
+    ])).rejects.toMatchObject({ name: "AbortError" });
+
+    let now = 1000;
+    const rateClient = createHttpClient({
+      transport: async () => response("{}"),
+      now: () => now,
+      sleep: async (_milliseconds, signal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+      defaultTimeoutMs: 10,
+      policies: { musicbrainz: { minIntervalMs: 1000, retries: 0 } }
+    });
+    await rateClient.getJson("musicbrainz", "https://example.test/prime");
+    now = 1000;
+    const queued = rateClient.getJson("musicbrainz", "https://example.test/queued");
+    await expect(Promise.race([
+      queued,
+      new Promise((resolve) => setTimeout(() => resolve("still pending"), 100))
+    ])).rejects.toThrow(/timed out/i);
   });
 
   it("enforces declared and actual response byte limits with an explicit larger cover limit", async () => {
