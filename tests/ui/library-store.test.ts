@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLibraryStore } from "../../src/stores/library-store";
 import type { MusicId3Api } from "../../shared/ipc";
-import type { ScanProgress } from "../../shared/types";
+import type { AudioMetadata, CueDocumentState, LibraryItem, ScanProgress } from "../../shared/types";
+
+function audio(path: string): Extract<LibraryItem, { kind: "audio" }> {
+  return { kind: "audio", path, fileName: path.split("/").pop() ?? path, extension: ".flac", sizeBytes: 1, durationMs: 1, metadata: { common: { title: "Original" }, raw: {}, durationMs: 1 }, wholeTrackStatus: "normal" };
+}
+
+function cue(path: string, title: string): CueDocumentState {
+  return { path, encoding: "utf8", rawText: `TITLE "${title}"`, parsed: { title, remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
+}
 
 it("cancels prior scans and ignores stale or cancelled progress", async () => {
   let listener: (progress: ScanProgress) => void = () => undefined;
@@ -107,3 +115,45 @@ it("leaves scanning state when folder selection is cancelled after stopping a pr
   expect(api.cancelScan).toHaveBeenCalled();
   expect(store.getState()).toMatchObject({ scanning: false, requestId: undefined, scanId: undefined });
 });
+
+it("keeps only the latest same-path audio refresh result", async () => {
+  let listener: (progress: ScanProgress) => void = () => undefined;
+  const reads: Array<ReturnType<typeof deferred<AudioMetadata>>> = [];
+  const api = { scanDirectory: vi.fn(async (_root: string, requestId: string) => ({ ok: true as const, requestId, scanId: "scan" })), cancelScan: vi.fn(), onScanProgress: vi.fn((next) => { listener = next; return () => undefined; }), readAudio: vi.fn(() => { const read = deferred<AudioMetadata>(); reads.push(read); return read.promise; }) } as unknown as MusicId3Api;
+  const store = createLibraryStore(api);
+  await store.selectRoot("D:/music");
+  listener({ scanId: "scan", phase: "scanning", scannedCount: 1, item: audio("D:/music/same.flac") });
+
+  const first = store.refreshItem("D:/music/same.flac");
+  const second = store.refreshItem("D:/music/same.flac");
+  reads[1].resolve({ common: { title: "Newest" }, raw: {}, durationMs: 1 });
+  await second;
+  reads[0].resolve({ common: { title: "Stale" }, raw: {}, durationMs: 1 });
+  await first;
+
+  expect(store.getState().items[0]).toMatchObject({ metadata: { common: { title: "Newest" } } });
+});
+
+it("keeps only the latest same-path CUE refresh result", async () => {
+  let listener: (progress: ScanProgress) => void = () => undefined;
+  const reads: Array<ReturnType<typeof deferred<CueDocumentState>>> = [];
+  const api = { scanDirectory: vi.fn(async (_root: string, requestId: string) => ({ ok: true as const, requestId, scanId: "scan" })), cancelScan: vi.fn(), onScanProgress: vi.fn((next) => { listener = next; return () => undefined; }), readCue: vi.fn(() => { const read = deferred<CueDocumentState>(); reads.push(read); return read.promise; }) } as unknown as MusicId3Api;
+  const store = createLibraryStore(api);
+  await store.selectRoot("D:/music");
+  listener({ scanId: "scan", phase: "scanning", scannedCount: 1, item: { kind: "cue", ...cue("D:/music/same.cue", "Original") } });
+
+  const first = store.refreshCue("D:/music/same.cue");
+  const second = store.refreshCue("D:/music/same.cue");
+  reads[1].resolve(cue("D:/music/same.cue", "Newest"));
+  await second;
+  reads[0].resolve(cue("D:/music/same.cue", "Stale"));
+  await first;
+
+  expect(store.getState().items[0]).toMatchObject({ parsed: { title: "Newest" } });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}

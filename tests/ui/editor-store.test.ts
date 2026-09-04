@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MusicId3Api } from "../../shared/ipc";
-import type { LibraryItem, MetadataCandidate } from "../../shared/types";
+import type { LibraryItem, MetadataCandidate, SaveCueInput } from "../../shared/types";
 import { createEditorStore } from "../../src/stores/editor-store";
 
 function deferred<T>() {
@@ -142,5 +142,61 @@ describe("editor store async ownership", () => {
 
     expect(getMetadataCandidate).not.toHaveBeenCalled();
     expect(store.getState()).toMatchObject({ draft: { cover }, selectedFields: ["cover"] });
+  });
+
+  it("serializes writes for one path and only applies the latest initiated result", async () => {
+    const writes = [
+      deferred<Awaited<ReturnType<MusicId3Api["writeAudio"]>>>(),
+      deferred<Awaited<ReturnType<MusicId3Api["writeAudio"]>>>()
+    ];
+    const writeAudio = vi.fn()
+      .mockImplementationOnce(() => writes[0].promise)
+      .mockImplementationOnce(() => writes[1].promise);
+    const store = createEditorStore({ writeAudio } as unknown as MusicId3Api);
+    store.setItem(audio("D:/same.flac"));
+    store.setField("title", "First");
+    store.setFieldSelected("title", true);
+
+    const first = store.confirmAudioWrite();
+    store.setField("title", "Second");
+    const second = store.confirmAudioWrite();
+
+    expect(writeAudio).toHaveBeenCalledTimes(1);
+    writes[0].resolve({ ok: true, metadata: { common: { title: "First on disk" }, raw: {}, durationMs: 1 } });
+    await first;
+    expect(store.getState().item).toMatchObject({ metadata: { common: { title: "same.flac title" } } });
+    await vi.waitFor(() => expect(writeAudio).toHaveBeenCalledTimes(2));
+    expect(writeAudio.mock.calls[1][1]).toMatchObject({ fields: { title: "Second" } });
+
+    writes[1].resolve({ ok: true, metadata: { common: { title: "Second on disk" }, raw: {}, durationMs: 1 } });
+    await second;
+    expect(store.getState().item).toMatchObject({ metadata: { common: { title: "Second on disk" } } });
+  });
+
+  it("serializes CUE saves for one path and ignores an older save error", async () => {
+    const saves = [
+      deferred<Awaited<ReturnType<MusicId3Api["saveCue"]>>>(),
+      deferred<Awaited<ReturnType<MusicId3Api["saveCue"]>>>()
+    ];
+    const saveCue = vi.fn()
+      .mockImplementationOnce(() => saves[0].promise)
+      .mockImplementationOnce(() => saves[1].promise);
+    const store = createEditorStore({ saveCue } as unknown as MusicId3Api);
+    const path = "D:/same.cue";
+    store.setItem({ kind: "cue", path, encoding: "utf8", rawText: "", parsed: { remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] });
+    const ownership = store.captureOwnership();
+    const input = (title: string): SaveCueInput => ({ path, encoding: "utf8", rawText: "", document: { title, remarks: [], files: [], tracks: [], unknownLines: [] } });
+
+    const first = store.saveCueDraft(input("First"), ownership);
+    const second = store.saveCueDraft(input("Second"), ownership);
+
+    expect(saveCue).toHaveBeenCalledTimes(1);
+    saves[0].resolve({ ok: false, error: "stale failure" });
+    await expect(first).resolves.toMatchObject({ ok: false, latest: false });
+    expect(store.getState().error).toBeUndefined();
+    await vi.waitFor(() => expect(saveCue).toHaveBeenCalledTimes(2));
+    expect(saveCue.mock.calls[1][0]).toMatchObject({ document: { title: "Second" } });
+    saves[1].resolve({ ok: true, path, backupPath: `${path}.bak` });
+    await expect(second).resolves.toMatchObject({ ok: true, latest: true });
   });
 });

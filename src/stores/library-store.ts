@@ -3,6 +3,7 @@ import type { AudioMetadata, LibraryItem, ScanProgress } from "../../shared/type
 import type { MusicId3Api } from "../../shared/ipc";
 
 export type LibraryState = { root?: string; items: LibraryItem[]; selectedPath?: string; scanning: boolean; requestId?: string; scanId?: string; scannedCount: number; totalCount?: number; error?: string };
+export type NewCueExpectation = { originatingAudioPath: string; isCurrent: () => boolean };
 
 function bridge(): MusicId3Api | undefined { return typeof window !== "undefined" ? window.musicId3 : undefined; }
 
@@ -11,6 +12,8 @@ export function createLibraryStore(api?: MusicId3Api) {
   let pendingProgress: ScanProgress[] = [];
   let scanGeneration = 0;
   let requestSequence = 0;
+  const itemRefreshGenerations = new Map<string, number>();
+  const cueRefreshGenerations = new Map<string, number>();
   const listeners = new Set<() => void>();
   const emit = () => listeners.forEach((listener) => listener());
   const onProgress = (progress: ScanProgress) => {
@@ -34,8 +37,29 @@ export function createLibraryStore(api?: MusicId3Api) {
     setWholeTrackOverride: (path: string, enabled = true) => { state = { ...state, items: state.items.map((item) => item.kind === "audio" && item.path === path ? { ...item, wholeTrackStatus: enabled ? "overridden" : "suspected" } : item) }; emit(); },
     updateAudioMetadata: (path: string, metadata: AudioMetadata, expectedGeneration = scanGeneration) => { if (expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "audio")) return false; state = { ...state, items: state.items.map((entry) => entry.path === path && entry.kind === "audio" ? { ...entry, metadata, cover: metadata.common.cover, durationMs: metadata.durationMs } : entry) }; emit(); return true; },
     cancelScan: async () => { const requestId = state.requestId; scanGeneration += 1; pendingProgress = []; state = { ...state, scanning: false, requestId: undefined, scanId: undefined, error: "Scan cancelled" }; emit(); if (!requestId) return; try { await getApi()?.cancelScan(requestId); } catch { state = { ...state, error: "Unable to cancel scan" }; emit(); } },
-    refreshItem: async (path: string, expectedGeneration = scanGeneration) => { const item = state.items.find((entry) => entry.path === path); const currentApi = getApi(); if (item?.kind === "audio" && currentApi && expectedGeneration === scanGeneration) { try { const metadata = await currentApi.readAudio(path); if (expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "audio")) return; state = { ...state, items: state.items.map((entry) => entry.path === path && entry.kind === "audio" ? { ...entry, metadata, cover: metadata.common.cover, durationMs: metadata.durationMs } : entry), error: undefined }; emit(); return metadata; } catch { if (expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "audio")) return; state = { ...state, error: "Unable to refresh audio metadata" }; emit(); } } },
-    refreshCue: async (path: string, expectedGeneration = scanGeneration) => { const currentApi = getApi(); if (!currentApi || expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "cue")) return; try { const refreshed = await currentApi.readCue(path); if (!refreshed) throw new Error("No CUE state returned"); if (expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "cue")) return; const item: Extract<LibraryItem, { kind: "cue" }> = { kind: "cue", ...refreshed }; state = { ...state, items: state.items.map((entry) => entry.path === path ? item : entry), error: undefined }; emit(); return item; } catch { if (expectedGeneration !== scanGeneration || !state.items.some((entry) => entry.path === path && entry.kind === "cue")) return; state = { ...state, error: "Unable to refresh CUE" }; emit(); } },
+    refreshItem: async (path: string, expectedGeneration = scanGeneration, isExpected: () => boolean = () => true) => {
+      const item = state.items.find((entry) => entry.path === path); const currentApi = getApi();
+      if (item?.kind !== "audio" || !currentApi || expectedGeneration !== scanGeneration || !isExpected()) return;
+      const request = (itemRefreshGenerations.get(path) ?? 0) + 1; itemRefreshGenerations.set(path, request);
+      const isCurrent = () => request === itemRefreshGenerations.get(path) && expectedGeneration === scanGeneration && isExpected() && state.items.some((entry) => entry.path === path && entry.kind === "audio");
+      try { const metadata = await currentApi.readAudio(path); if (!isCurrent()) return; state = { ...state, items: state.items.map((entry) => entry.path === path && entry.kind === "audio" ? { ...entry, metadata, cover: metadata.common.cover, durationMs: metadata.durationMs } : entry), error: undefined }; emit(); return metadata; }
+      catch { if (!isCurrent()) return; state = { ...state, error: "Unable to refresh audio metadata" }; emit(); }
+    },
+    refreshCue: async (path: string, expectedGeneration = scanGeneration, expectedNewCue?: NewCueExpectation) => {
+      const currentApi = getApi();
+      const hasExistingCue = () => state.items.some((entry) => entry.path === path && entry.kind === "cue");
+      const hasExpectedOrigin = () => Boolean(expectedNewCue && path === `${expectedNewCue.originatingAudioPath}.cue` && expectedNewCue.isCurrent() && state.items.some((entry) => entry.path === expectedNewCue.originatingAudioPath && entry.kind === "audio"));
+      const canRefresh = () => expectedGeneration === scanGeneration && (hasExistingCue() || hasExpectedOrigin());
+      if (!currentApi || !canRefresh()) return;
+      const request = (cueRefreshGenerations.get(path) ?? 0) + 1; cueRefreshGenerations.set(path, request);
+      const isCurrent = () => request === cueRefreshGenerations.get(path) && canRefresh();
+      try {
+        const refreshed = await currentApi.readCue(path); if (!refreshed) throw new Error("No CUE state returned"); if (!isCurrent()) return;
+        const item: Extract<LibraryItem, { kind: "cue" }> = { kind: "cue", ...refreshed };
+        state = { ...state, items: hasExistingCue() ? state.items.map((entry) => entry.path === path ? item : entry) : [...state.items, item], error: undefined };
+        emit(); return item;
+      } catch { if (!isCurrent()) return; state = { ...state, error: "Unable to refresh CUE" }; emit(); }
+    },
     dispose: () => unsubscribe?.(),
   };
 }
