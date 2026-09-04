@@ -22,6 +22,7 @@
     "chardet": "1.6.0",
     "cue-parser": "0.3.0",
     "electron": "^44.2.0",
+    "fast-xml-parser": "^5.11.1",
     "iconv-lite": "^0.7.3",
     "node-taglib-sharp": "^6.0.3",
     "react": "^19.2.8",

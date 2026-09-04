@@ -201,6 +201,32 @@ describe("metadata adapters", () => {
         evidence: []
       });
     }
+
+    const validEntries = createCtdbAdapter({
+      http: clientFor(queueTransport([response('<ctdb status="ok" nentries="1"><entry confidence="12" /></ctdb>')]).transport)
+    });
+    await expect(validEntries.validate("0:13350:26850")).resolves.toEqual({
+      status: "match",
+      confidence: 12,
+      evidence: ["CTDB verified the pressing"]
+    });
+  });
+
+  it("rejects nested, mismatched, and non-numeric CTDB documents as unavailable", async () => {
+    for (const body of [
+      '<ctdb status="ok" nentries="0"><broken></ctdb>',
+      '<ctdb status="ok" nentries="0"><broken></ctdb><tail />',
+      '<ctdb status="ok" nentries="zero" />',
+      '<ctdb status="ok" nentries="-1" />',
+      '<ctdb status="ok" nentries="1.5"><entry /></ctdb>'
+    ]) {
+      const malformed = createCtdbAdapter({ http: clientFor(queueTransport([response(body)]).transport) });
+      await expect(malformed.validate("0:13350:26850")).resolves.toEqual({
+        status: "unavailable",
+        error: "CTDB returned an invalid response",
+        evidence: []
+      });
+    }
   });
 
   it("maps NetEase search/detail fixtures and obtains the current Cookie for every request", async () => {

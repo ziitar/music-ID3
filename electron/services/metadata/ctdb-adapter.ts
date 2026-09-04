@@ -1,4 +1,5 @@
 import type { CoverArt, MetadataCandidate } from "../../../shared/types";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 import type { MetadataAdapter } from "./adapter";
 import { HttpRequestError, type HttpClient } from "./http-client";
 
@@ -31,6 +32,32 @@ function isAbortError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
+const ctdbParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  parseAttributeValue: false,
+  processEntities: false,
+  allowBooleanAttributes: false,
+  trimValues: true
+});
+
+function parseCtdbResponse(xml: string): { nentries: number } | undefined {
+  if (XMLValidator.validate(xml) !== true) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = ctdbParser.parse(xml);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const root = (parsed as Record<string, unknown>).ctdb;
+  if (typeof root !== "object" || root === null || Array.isArray(root)) return undefined;
+  const nentries = (root as Record<string, unknown>)["@_nentries"];
+  if (typeof nentries !== "string" || !/^\d+$/.test(nentries)) return undefined;
+  const numericNentries = Number(nentries);
+  return Number.isSafeInteger(numericNentries) ? { nentries: numericNentries } : undefined;
+}
+
 export function createCtdbAdapter(options: { http: HttpClient }): CtdbAdapter {
   return {
     async search() {
@@ -55,12 +82,15 @@ export function createCtdbAdapter(options: { http: HttpClient }): CtdbAdapter {
           headers: { "User-Agent": "MusicID3Desktop/1.0 (https://github.com/uziit/music-ID3)" }
         });
         const xml = new TextDecoder().decode(document.data);
-        const validDocument = /^\s*(?:<\?xml\b[^>]*>\s*)?<ctdb\b[^>]*(?:\/\s*>|>[\s\S]*<\/ctdb\s*>)\s*$/i.test(xml);
-        if (validDocument && /<ctdb\b[^>]*\bnentries=["']0["']/i.test(xml)) {
+        const parsed = parseCtdbResponse(xml);
+        if (!parsed) {
+          return { status: "unavailable", error: "CTDB returned an invalid response", evidence: [] };
+        }
+        if (parsed.nentries === 0) {
           return { status: "no-match", evidence: ["CTDB returned no matching pressing"] };
         }
         const confidence = Number.parseInt(xml.match(/\bconfidence=["'](\d+)["']/i)?.[1] ?? "", 10);
-        if (validDocument && (/<entry\b/i.test(xml) || /<ctdb\b[^>]*\bnentries=["'][1-9]\d*["']/i.test(xml))) {
+        if (parsed.nentries > 0) {
           return {
             status: "match",
             ...(Number.isFinite(confidence) ? { confidence } : {}),

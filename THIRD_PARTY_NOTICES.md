@@ -50,6 +50,16 @@ stop working.
   are not copied.
 - Copyright: Copyright (c) 2019 Rain120 and contributors.
 
+## Fast XML Parser
+
+- Upstream: https://github.com/NaturalIntelligence/fast-xml-parser
+- Version: `5.11.1`
+- License: MIT
+- Local usage: `electron/services/metadata/ctdb-adapter.ts` uses
+  `XMLValidator` and `XMLParser` with attributes enabled and entity processing
+  disabled to classify CTDB response documents safely before reading the
+  numeric `nentries` attribute.
+
 ## MIT License Text
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
