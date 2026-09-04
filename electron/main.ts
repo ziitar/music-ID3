@@ -36,12 +36,13 @@ app.whenReady().then(() => {
     metadataAdapters: {
       musicbrainz: createMusicBrainzAdapter({
         http,
-        userAgent: process.env.MUSIC_ID3_USER_AGENT ?? "MusicID3Desktop/1.0 (personal desktop metadata editor)"
+        userAgent: process.env.MUSIC_ID3_USER_AGENT
       }),
       ctdb: createCtdbAdapter({ http }),
       netease: createNeteaseAdapter({ http, cookieStore }),
       qq: createQqMusicAdapter({ http, cookieStore })
-    }
+    },
+    clearOnlineCache: http.clearCache
   });
   createWindow();
 

@@ -1,0 +1,31 @@
+{
+  "search": {
+    "host": "c.y.qq.com",
+    "referer": "https://c.y.qq.com/",
+    "params": {
+      "g_tk": "1124214810",
+      "loginUin": "12345",
+      "hostUin": "0",
+      "inCharset": "utf8",
+      "outCharset": "utf-8",
+      "notice": "0",
+      "platform": "yqq.json",
+      "needNewCode": "0"
+    }
+  },
+  "detail": {
+    "host": "u.y.qq.com",
+    "referer": "https://y.qq.com/portal/player.html",
+    "contentType": "application/x-www-form-urlencoded",
+    "params": {
+      "g_tk": "1124214810",
+      "loginUin": "12345",
+      "hostUin": "0",
+      "inCharset": "utf8",
+      "outCharset": "utf-8",
+      "notice": "0",
+      "platform": "yqq.json",
+      "needNewCode": "0"
+    }
+  }
+}

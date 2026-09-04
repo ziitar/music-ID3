@@ -16,12 +16,14 @@ stop working.
   no warranty and permits use, modification, redistribution, and commercial use
   under the MIT License.
 - Logic reviewed: `module/search.js`, `module/song_detail.js`, `module/album.js`,
-  `util/option.js`, `util/request.js`, and `util/config.json`.
+  `util/crypto.js`, `util/option.js`, `util/request.js`, and `util/config.json`.
 - Local extraction/modification: `electron/services/metadata/netease-adapter.ts`
-  keeps only the song-search and song-detail form parameters, maps provider JSON
-  to the application's metadata contract, derives cover requests from returned
-  album image URLs, and injects the encrypted-at-rest Cookie only at request
-  time. The upstream server and its encryption/proxy framework are not copied.
+  keeps only the EAPI search and WEAPI song-detail request-envelope construction,
+  maps provider JSON to the application's metadata contract, derives cover
+  requests from returned album image URLs, and injects the encrypted-at-rest
+  Cookie only at request time. The cryptographic operations were rewritten with
+  Node's built-in `crypto` module; the upstream server and proxy framework are
+  not copied.
 - Copyright: Copyright (c) 2013-2022 Binaryify and contributors.
 
 ## QQ Music API

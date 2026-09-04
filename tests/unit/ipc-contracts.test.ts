@@ -30,6 +30,7 @@ describe("IPC contracts", () => {
       searchMetadata: "music-id3:search-metadata",
       setProviderCookie: "music-id3:set-provider-cookie",
       testProviderCookie: "music-id3:test-provider-cookie",
+      clearOnlineCache: "music-id3:clear-online-cache",
       scanProgress: "music-id3:scan-progress"
     });
   });
@@ -64,7 +65,8 @@ describe("IPC contracts", () => {
       ipcChannels.saveCue,
       ipcChannels.searchMetadata,
       ipcChannels.setProviderCookie,
-      ipcChannels.testProviderCookie
+      ipcChannels.testProviderCookie,
+      ipcChannels.clearOnlineCache
     ]);
     expect(registered).not.toContain(ipcChannels.scanProgress);
   });

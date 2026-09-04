@@ -18,6 +18,7 @@ type RegisterIpcHandlersOptions = {
   showOpenDialog(options: OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
   cookieStore: Pick<CookieStore, "set" | "redacted">;
   metadataAdapters?: Partial<Record<MetadataSource, MetadataAdapter>>;
+  clearOnlineCache?: () => void;
 };
 
 function asString(value: unknown, name: string): string {
@@ -80,7 +81,13 @@ function publishScanProgress(event: unknown, progress: ScanProgress): void {
   sender?.send(ipcChannels.scanProgress, progress);
 }
 
-export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore, metadataAdapters = {} }: RegisterIpcHandlersOptions): void {
+export function registerIpcHandlers({
+  ipcMain,
+  showOpenDialog,
+  cookieStore,
+  metadataAdapters = {},
+  clearOnlineCache = () => undefined
+}: RegisterIpcHandlersOptions): void {
   ipcMain.handle(ipcChannels.selectDirectory, async () => {
     const result = await showOpenDialog({ properties: ["openDirectory"] });
     return result.canceled ? undefined : result.filePaths[0];
@@ -148,5 +155,9 @@ export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore, meta
     } catch {
       return { ok: false, error: "Provider connectivity check failed" };
     }
+  });
+
+  ipcMain.handle(ipcChannels.clearOnlineCache, async () => {
+    clearOnlineCache();
   });
 }

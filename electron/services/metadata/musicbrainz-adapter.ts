@@ -2,6 +2,7 @@ import type { CoverArt, MetadataCandidate } from "../../../shared/types";
 import type { HttpClient } from "./http-client";
 import { HttpRequestError } from "./http-client";
 import type { MetadataAdapter } from "./adapter";
+import { toCtdbToc } from "./ctdb-adapter";
 
 type ArtistCredit = Array<{ name?: string; joinphrase?: string; artist?: { name?: string } }>;
 type MusicBrainzTrack = {
@@ -32,6 +33,7 @@ type MusicBrainzRelease = {
 
 const musicBrainzBase = "https://musicbrainz.org/ws/2";
 const coverArtBase = "https://coverartarchive.org";
+const defaultUserAgent = "MusicID3Desktop/1.0 (https://github.com/uziit/music-ID3)";
 
 function creditName(credits: ArtistCredit | undefined): string | undefined {
   if (!credits?.length) return undefined;
@@ -74,14 +76,16 @@ function releaseCandidate(release: MusicBrainzRelease): MetadataCandidate {
     discId: primaryDisc?.id,
     discIds: discs.map((disc) => disc.id as string),
     offsets,
-    toc: offsets?.length && primaryDisc?.sectors !== undefined ? `0+${[...offsets, primaryDisc.sectors].join("+")}` : undefined,
+    toc: offsets?.length && primaryDisc?.sectors !== undefined
+      ? toCtdbToc({ offsets, sectors: primaryDisc.sectors })
+      : undefined,
     confidence: "low",
     evidence
   };
 }
 
-export function createMusicBrainzAdapter(options: { http: HttpClient; userAgent: string }): MetadataAdapter {
-  const headers = { Accept: "application/json", "User-Agent": options.userAgent };
+export function createMusicBrainzAdapter(options: { http: HttpClient; userAgent?: string }): MetadataAdapter {
+  const headers = { Accept: "application/json", "User-Agent": options.userAgent ?? defaultUserAgent };
   const cacheTtlMs = 15 * 60 * 1000;
 
   return {

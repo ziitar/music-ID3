@@ -11,6 +11,7 @@ const musicId3: MusicId3Api = {
   searchMetadata: (source, query) => ipcRenderer.invoke(ipcChannels.searchMetadata, source, query),
   setProviderCookie: (source, value) => ipcRenderer.invoke(ipcChannels.setProviderCookie, source, value),
   testProviderCookie: (source) => ipcRenderer.invoke(ipcChannels.testProviderCookie, source),
+  clearOnlineCache: () => ipcRenderer.invoke(ipcChannels.clearOnlineCache),
   onScanProgress: (listener) => {
     const callback = (_event: Electron.IpcRendererEvent, progress: Parameters<typeof listener>[0]) => listener(progress);
     ipcRenderer.on(ipcChannels.scanProgress, callback);

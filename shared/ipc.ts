@@ -23,6 +23,7 @@ export const ipcChannels = {
   searchMetadata: "music-id3:search-metadata",
   setProviderCookie: "music-id3:set-provider-cookie",
   testProviderCookie: "music-id3:test-provider-cookie",
+  clearOnlineCache: "music-id3:clear-online-cache",
   scanProgress: "music-id3:scan-progress"
 } as const;
 
@@ -44,6 +45,7 @@ export type MusicId3Api = {
   searchMetadata(source: MetadataSource, query: string): Promise<MetadataCandidate[]>;
   setProviderCookie(source: CookieSource, value: string): Promise<void>;
   testProviderCookie(source: CookieSource): Promise<CookieTestResult>;
+  clearOnlineCache(): Promise<void>;
   onScanProgress(listener: (progress: ScanProgress) => void): () => void;
 };
 

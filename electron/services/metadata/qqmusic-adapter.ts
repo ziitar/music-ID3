@@ -17,8 +17,39 @@ type QqSong = {
   singer?: Array<{ name?: string }>;
 };
 
+const sessionCacheTtlMs = 5 * 60 * 1000;
+const coverMaxBytes = 20 * 1024 * 1024;
+
+function cookieValues(cookie: string | undefined): Record<string, string> {
+  return Object.fromEntries((cookie ?? "").split(";").map((part) => part.trim()).filter(Boolean).map((part) => {
+    const separator = part.indexOf("=");
+    return separator < 0 ? [part, ""] : [part.slice(0, separator), part.slice(separator + 1)];
+  }));
+}
+
+function commonParams(cookie: string | undefined): Record<string, string> {
+  return {
+    g_tk: "1124214810",
+    loginUin: cookieValues(cookie).uin ?? "0",
+    hostUin: "0",
+    inCharset: "utf8",
+    outCharset: "utf-8",
+    notice: "0",
+    platform: "yqq.json",
+    needNewCode: "0"
+  };
+}
+
 function coverUrl(albumMid: string | undefined): string | undefined {
   return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg?max_age=2592000` : undefined;
+}
+
+function safeCoverUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:" || url.hostname.toLocaleLowerCase("en-US") !== "y.gtimg.cn") {
+    throw new TypeError("Invalid QQ Music cover URL");
+  }
+  return url.toString();
 }
 
 function mapSong(song: QqSong): MetadataCandidate {
@@ -41,26 +72,24 @@ export function createQqMusicAdapter(options: {
   http: HttpClient;
   cookieStore: Pick<CookieStore, "get">;
 }): MetadataAdapter {
-  function requestOptions(): HttpRequestOptions {
+  function requestOptions(cookie: string | undefined, headers: Record<string, string>, cacheKey: string): HttpRequestOptions {
     return {
       headers: {
         Accept: "application/json",
-        Referer: "https://y.qq.com/"
+        ...headers,
+        ...(cookie ? { Cookie: cookie } : {})
       },
-      getHeaders: async () => {
-        const cookie = await options.cookieStore.get("qq");
-        const headers: Record<string, string> = {};
-        if (cookie) headers.Cookie = cookie;
-        return headers;
-      }
+      cacheTtlMs: sessionCacheTtlMs,
+      cacheKey
     };
   }
 
   async function search(query: string): Promise<MetadataCandidate[]> {
+    const cookie = await options.cookieStore.get("qq");
     const params = new URLSearchParams({
+      ...commonParams(cookie),
       w: query,
       format: "json",
-      outCharset: "utf-8",
       ct: "24",
       qqmusic_ver: "1298",
       remoteplace: "txt.yqq.song",
@@ -68,12 +97,14 @@ export function createQqMusicAdapter(options: {
       aggr: "1",
       cr: "1",
       lossless: "0",
-      flag_qc: "0",
-      platform: "yqq.json"
+      flag_qc: "0"
     });
     const result = await options.http.getJson<{
       data?: { song?: { list?: QqSong[] }; songlist?: QqSong[] };
-    }>("qq", `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?${params}`, requestOptions());
+    }>("qq", `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?${params}`, requestOptions(cookie, {
+      Referer: "https://c.y.qq.com/",
+      Host: "c.y.qq.com"
+    }, `qq:search:${query}`));
     return (result.data?.song?.list ?? result.data?.songlist ?? []).map(mapSong);
   }
 
@@ -81,6 +112,7 @@ export function createQqMusicAdapter(options: {
     search,
 
     async getDetails(id) {
+      const cookie = await options.cookieStore.get("qq");
       const data = JSON.stringify({
         comm: { ct: 24, cv: 0 },
         songinfo: {
@@ -90,17 +122,17 @@ export function createQqMusicAdapter(options: {
         }
       });
       const params = new URLSearchParams({
+        ...commonParams(cookie),
         format: "json",
-        inCharset: "utf8",
-        outCharset: "utf-8",
-        notice: "0",
-        platform: "yqq.json",
-        needNewCode: "0",
         data
       });
       const result = await options.http.getJson<{
         songinfo?: { data?: { track_info: QqSong } | QqSong };
-      }>("qq", `https://u.y.qq.com/cgi-bin/musicu.fcg?${params}`, requestOptions());
+      }>("qq", `https://u.y.qq.com/cgi-bin/musicu.fcg?${params}`, requestOptions(cookie, {
+        Referer: "https://y.qq.com/portal/player.html",
+        Host: "u.y.qq.com",
+        "Content-Type": "application/x-www-form-urlencoded"
+      }, `qq:details:${id}`));
       const dataResult = result.songinfo?.data;
       const song = dataResult && "track_info" in dataResult ? dataResult.track_info : dataResult;
       if (!song) throw new Error("QQ Music returned no song details");
@@ -109,7 +141,12 @@ export function createQqMusicAdapter(options: {
 
     async getCover(candidate) {
       if (!candidate.coverUrl) return undefined;
-      const result = await options.http.getBytes("qq", candidate.coverUrl, requestOptions());
+      const result = await options.http.getBytes("qq", safeCoverUrl(candidate.coverUrl), {
+        headers: { Accept: "image/*", Referer: "https://y.qq.com/" },
+        maxResponseBytes: coverMaxBytes,
+        cacheTtlMs: sessionCacheTtlMs,
+        cacheKey: `qq:cover:${candidate.coverUrl}`
+      });
       return { mimeType: result.mimeType, data: Buffer.from(result.data).toString("base64") };
     },
 

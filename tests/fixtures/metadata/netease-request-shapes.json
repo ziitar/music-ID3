@@ -1,0 +1,13 @@
+{
+  "search": {
+    "url": "https://interfacepc.music.163.com/eapi/search/get",
+    "method": "POST",
+    "cryptoPath": "/api/search/get",
+    "fields": { "s": "Mystery of Love", "type": 1, "limit": 30, "offset": 0, "e_r": false }
+  },
+  "detail": {
+    "url": "https://music.163.com/weapi/v3/song/detail",
+    "method": "POST",
+    "fields": { "c": "[{\"id\":1859245776}]", "csrf_token": "csrf-value" }
+  }
+}

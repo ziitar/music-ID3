@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { MetadataSource } from "../../../shared/types";
 
 export type HttpTransportRequest = {
@@ -6,6 +7,7 @@ export type HttpTransportRequest = {
   headers: Record<string, string>;
   body?: string | Uint8Array;
   signal: AbortSignal;
+  maxResponseBytes: number;
 };
 
 export type HttpTransportResponse = {
@@ -38,6 +40,8 @@ export type HttpRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
   cacheTtlMs?: number;
+  cacheKey?: string;
+  maxResponseBytes?: number;
 };
 
 export type HttpClient = {
@@ -72,9 +76,17 @@ export function createElectronTransport(electronNet: {
       body,
       signal: request.signal
     });
+    const declaredLength = Number(result.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > request.maxResponseBytes) {
+      throw new HttpRequestError("Provider response exceeded size limit");
+    }
     const headers: Record<string, string> = {};
     result.headers.forEach((value, key) => { headers[key.toLowerCase()] = value; });
-    return { status: result.status, headers, body: new Uint8Array(await result.arrayBuffer()) };
+    const bodyBytes = new Uint8Array(await result.arrayBuffer());
+    if (bodyBytes.byteLength > request.maxResponseBytes) {
+      throw new HttpRequestError("Provider response exceeded size limit");
+    }
+    return { status: result.status, headers, body: bodyBytes };
   };
 }
 
@@ -119,6 +131,23 @@ function asText(body: string | Uint8Array): string {
   return typeof body === "string" ? body : new TextDecoder().decode(body);
 }
 
+function responseBytes(body: string | Uint8Array): number {
+  return typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
+}
+
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const match = Object.entries(headers).find(([key]) => key.toLocaleLowerCase("en-US") === name);
+  return match?.[1];
+}
+
+function authDigest(headers: Record<string, string>): string {
+  const authHeaders = Object.entries(headers)
+    .filter(([name]) => /^(authorization|cookie|proxy-authorization|x-music-u)$/i.test(name))
+    .map(([name, value]) => [name.toLocaleLowerCase("en-US"), value] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return createHash("sha256").update(JSON.stringify(authHeaders)).digest("hex");
+}
+
 export function createHttpClient(options: {
   transport: HttpTransport;
   policies?: Partial<Record<MetadataSource, ProviderPolicy>>;
@@ -126,6 +155,8 @@ export function createHttpClient(options: {
   diagnostics?: (entry: HttpDiagnostic) => void;
   now?: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  defaultMaxResponseBytes?: number;
+  maxCacheEntries?: number;
 }): HttpClient {
   const policies = { ...defaultPolicies, ...options.policies };
   const cache = new Map<string, { expiresAt: number; response: HttpTransportResponse }>();
@@ -134,6 +165,36 @@ export function createHttpClient(options: {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const defaultTimeoutMs = options.defaultTimeoutMs ?? 10000;
+  const defaultMaxResponseBytes = options.defaultMaxResponseBytes ?? 5 * 1024 * 1024;
+  const maxCacheEntries = options.maxCacheEntries ?? 128;
+
+  function purgeExpiredCacheEntries(): void {
+    const currentTime = now();
+    for (const [key, entry] of cache) {
+      if (entry.expiresAt <= currentTime) cache.delete(key);
+    }
+  }
+
+  function readCache(key: string): HttpTransportResponse | undefined {
+    purgeExpiredCacheEntries();
+    const entry = cache.get(key);
+    if (!entry) return undefined;
+    cache.delete(key);
+    cache.set(key, entry);
+    return entry.response;
+  }
+
+  function writeCache(key: string, expiresAt: number, response: HttpTransportResponse): void {
+    if (maxCacheEntries <= 0) return;
+    purgeExpiredCacheEntries();
+    cache.delete(key);
+    while (cache.size >= maxCacheEntries) {
+      const oldestKey = cache.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      cache.delete(oldestKey);
+    }
+    cache.set(key, { expiresAt, response });
+  }
 
   async function acquireRateLimit(provider: MetadataSource, signal?: AbortSignal): Promise<void> {
     const previousTurn = rateQueues.get(provider) ?? Promise.resolve();
@@ -150,15 +211,29 @@ export function createHttpClient(options: {
     await turn;
   }
 
+  async function resolveHeaders(requestOptions: HttpRequestOptions): Promise<Record<string, string>> {
+    try {
+      const dynamicHeaders = requestOptions.getHeaders ? await requestOptions.getHeaders() : {};
+      if (requestOptions.signal?.aborted) throw abortError();
+      return { ...requestOptions.headers, ...dynamicHeaders };
+    } catch (error) {
+      if (requestOptions.signal?.aborted) throw abortError();
+      throw error instanceof HttpRequestError ? error : new HttpRequestError("Provider request headers are unavailable");
+    }
+  }
+
   async function request(provider: MetadataSource, url: string, requestOptions: HttpRequestOptions = {}): Promise<HttpTransportResponse> {
     const method = requestOptions.method ?? "GET";
-    const cacheKey = `${provider}:${method}:${url}:${typeof requestOptions.body === "string" ? requestOptions.body : ""}`;
-    const cached = cache.get(cacheKey);
-    if (cached && cached.expiresAt > now()) return cached.response;
-
     const policy = policies[provider];
     for (let attempt = 0; attempt <= policy.retries; attempt += 1) {
       if (requestOptions.signal?.aborted) throw abortError();
+      const headers = await resolveHeaders(requestOptions);
+      const cacheBase = requestOptions.cacheKey ?? `${provider}:${method}:${url}:${typeof requestOptions.body === "string" ? requestOptions.body : ""}`;
+      const cacheKey = `${cacheBase}:${authDigest(headers)}`;
+      if (attempt === 0 && requestOptions.cacheTtlMs && requestOptions.cacheTtlMs > 0) {
+        const cached = readCache(cacheKey);
+        if (cached) return cached;
+      }
       await acquireRateLimit(provider, requestOptions.signal);
 
       const controller = new AbortController();
@@ -171,22 +246,30 @@ export function createHttpClient(options: {
       }, requestOptions.timeoutMs ?? defaultTimeoutMs);
 
       try {
-        const dynamicHeaders = requestOptions.getHeaders ? await requestOptions.getHeaders() : {};
         const requestUrl = sanitizedUrl(url);
+        const maxResponseBytes = requestOptions.maxResponseBytes ?? defaultMaxResponseBytes;
         options.diagnostics?.({ provider, phase: "request", url: requestUrl, attempt: attempt + 1 });
         const response = await options.transport({
           url,
           method,
-          headers: { ...requestOptions.headers, ...dynamicHeaders },
+          headers,
           body: requestOptions.body,
-          signal: controller.signal
+          signal: controller.signal,
+          maxResponseBytes
         });
         if (response.status < 200 || response.status >= 300) {
           throw new HttpRequestError(`Provider request failed with HTTP ${response.status}`, response.status);
         }
+        const declaredLength = Number(headerValue(response.headers, "content-length"));
+        if (
+          (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) ||
+          responseBytes(response.body) > maxResponseBytes
+        ) {
+          throw new HttpRequestError("Provider response exceeded size limit");
+        }
         options.diagnostics?.({ provider, phase: "success", url: requestUrl, attempt: attempt + 1, status: response.status });
         if (requestOptions.cacheTtlMs && requestOptions.cacheTtlMs > 0) {
-          cache.set(cacheKey, { expiresAt: now() + requestOptions.cacheTtlMs, response });
+          writeCache(cacheKey, now() + requestOptions.cacheTtlMs, response);
         }
         return response;
       } catch (error) {
