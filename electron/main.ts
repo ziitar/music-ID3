@@ -1,5 +1,7 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from "electron";
 import path from "node:path";
+import { registerIpcHandlers } from "./ipc/register-ipc";
+import { createCookieStore } from "./services/cookie-store";
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -20,6 +22,11 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  registerIpcHandlers({
+    ipcMain,
+    showOpenDialog: (options) => dialog.showOpenDialog(options),
+    cookieStore: createCookieStore({ safeStorage, userDataPath: app.getPath("userData") })
+  });
   createWindow();
 
   app.on("activate", () => {
