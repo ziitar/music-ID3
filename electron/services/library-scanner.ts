@@ -1,9 +1,10 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import type { Dirent, Stats } from "node:fs";
 import path from "node:path";
-import type { AudioMetadata, CueDocument, LibraryItem } from "../../shared/types";
+import type { AudioMetadata, LibraryItem } from "../../shared/types";
 import { isSupportedAudioPath, wholeTrackStatus } from "./audio-format";
-import { readCueFileReferences } from "./cue-file-references";
+import { resolveCueFileReferences } from "./cue-file-references";
+import { readCue } from "./cue-service";
 import { readAudioMetadata } from "./tag-service";
 
 export type ScanSummary = {
@@ -19,7 +20,7 @@ type ScannedPaths = {
 
 export type LibraryScannerDependencies = {
   readdir: (directory: string, options: { withFileTypes: true }) => Promise<Dirent[]>;
-  readFile: (filePath: string, encoding: "utf8") => Promise<string>;
+  readCue: typeof readCue;
   stat: (filePath: string) => Promise<Stats>;
   readAudioMetadata: (filePath: string) => Promise<AudioMetadata>;
 };
@@ -69,19 +70,10 @@ async function walkDirectory(
   return { files, audio, cue };
 }
 
-function scannerCueDocument(referencedFiles: string[]): CueDocument {
-  return {
-    remarks: [],
-    files: referencedFiles.map((filePath) => ({ path: filePath })),
-    tracks: [],
-    unknownLines: []
-  };
-}
-
 export function createLibraryScanner(overrides: Partial<LibraryScannerDependencies> = {}) {
   const dependencies: LibraryScannerDependencies = {
     readdir,
-    readFile,
+    readCue,
     stat,
     readAudioMetadata,
     ...overrides
@@ -95,22 +87,24 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
 
     for (const cuePath of scanned.cue) {
       try {
-        const [{ referencedFiles, missingReferencedFiles }, rawText] = await Promise.all([
-          readCueFileReferences(cuePath, scanned.files),
-          dependencies.readFile(cuePath, "utf8")
-        ]);
+        const cueState = await dependencies.readCue(cuePath);
+        const { referencedFiles, missingReferencedFiles } = await resolveCueFileReferences(
+          cuePath,
+          cueState.parsed.files.map((file) => file.path),
+          scanned.files
+        );
         for (const referencedPath of referencedFiles) {
           cueByReferencedAudio.set(path.normalize(referencedPath).toLocaleLowerCase("en-US"), cuePath);
         }
         const cueItem: LibraryItem = {
           kind: "cue",
-          path: cuePath,
-          encoding: "utf8",
-          rawText,
-          parsed: scannerCueDocument(referencedFiles),
+          ...cueState,
           referencedFiles,
           missingReferencedFiles
         };
+        if (cueState.parseError) {
+          errors.push({ path: cuePath, error: cueState.parseError });
+        }
         cueItems.push(cueItem);
         onItem(cueItem);
       } catch (error) {
@@ -120,9 +114,10 @@ export function createLibraryScanner(overrides: Partial<LibraryScannerDependenci
           path: cuePath,
           encoding: "utf8",
           rawText: "",
-          parsed: scannerCueDocument([]),
+          parsed: { remarks: [], files: [], tracks: [], unknownLines: [] },
           referencedFiles: [],
-          missingReferencedFiles: []
+          missingReferencedFiles: [],
+          parseError: errorMessage(error)
         };
         cueItems.push(cueItem);
         onItem(cueItem);

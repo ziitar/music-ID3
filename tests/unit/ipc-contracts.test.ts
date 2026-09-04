@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerIpcHandlers } from "../../electron/ipc/register-ipc";
 import { ipcChannels, isIpcChannel } from "../../shared/ipc";
+import type { CueDocument } from "../../shared/types";
 
 const temporaryDirectories: string[] = [];
 
@@ -100,5 +101,36 @@ describe("IPC contracts", () => {
     expect(progress).toEqual([
       expect.objectContaining({ phase: "complete", scannedCount: 0, scanId: (started as { scanId: string }).scanId })
     ]);
+  });
+
+  it("reads and saves CUE files through the concrete allow-listed handlers", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const root = await createTempDir();
+    const cuePath = path.join(root, "album.cue");
+    const original = 'TITLE "Before"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const replacement: CueDocument = {
+      title: "After",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }
+    });
+
+    const read = await handlers.get(ipcChannels.readCue)?.({}, cuePath);
+    const saved = await handlers.get(ipcChannels.saveCue)?.({}, {
+      path: cuePath,
+      document: replacement,
+      rawText: "",
+      encoding: "utf8"
+    });
+
+    expect(read).toMatchObject({ path: cuePath, parsed: { title: "Before" } });
+    expect(saved).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
   });
 });

@@ -42,9 +42,13 @@ export type CueEncoding = "utf8" | "utf8-bom" | "gb18030" | "gbk" | "big5" | "sh
 
 export type CueTrack = {
   number: number;
+  type?: string;
+  fileIndex?: number;
   title?: string;
   performer?: string;
   songwriter?: string;
+  pregap?: string;
+  postgap?: string;
   indexes: Array<{ number: number; time: string }>;
 };
 
@@ -56,6 +60,8 @@ export type CueDocument = {
   files: Array<{ path: string; type?: string }>;
   tracks: CueTrack[];
   unknownLines: string[];
+  sourceText?: string;
+  sourceFingerprint?: string;
 };
 
 export type CueDocumentState = {
@@ -66,6 +72,7 @@ export type CueDocumentState = {
   referencedFiles: string[];
   missingReferencedFiles: string[];
   candidateEncodings?: CueEncoding[];
+  parseError?: string;
 };
 
 export type SaveCueInput = {
@@ -96,6 +103,8 @@ export type LibraryItem =
       parsed: CueDocument;
       referencedFiles: string[];
       missingReferencedFiles: string[];
+      candidateEncodings?: CueEncoding[];
+      parseError?: string;
     };
 
 export type MetadataCandidate = {

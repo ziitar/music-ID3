@@ -1,7 +1,6 @@
 import { access } from "node:fs/promises";
 import path from "node:path";
-import { parse } from "cue-parser";
-import type { ICueSheet } from "cue-parser/lib/types";
+import { readCue } from "./cue-service";
 
 export type CueFileReferences = {
   referencedFiles: string[];
@@ -30,18 +29,27 @@ export async function readCueFileReferences(
   cuePath: string,
   discoveredPaths: readonly string[] = []
 ): Promise<CueFileReferences> {
+  const cue = await readCue(cuePath);
+  return resolveCueFileReferences(
+    cuePath,
+    cue.parsed.files.map((file) => file.path),
+    discoveredPaths
+  );
+}
+
+export async function resolveCueFileReferences(
+  cuePath: string,
+  references: readonly string[],
+  discoveredPaths: readonly string[] = []
+): Promise<CueFileReferences> {
   const discoveredByCaseInsensitivePath = new Map(
     discoveredPaths.map((filePath) => [normalizedPath(filePath), filePath])
   );
-  const cue = parse(cuePath) as ICueSheet;
   const referencedFiles: string[] = [];
   const missingReferencedFiles: string[] = [];
 
-  for (const file of cue.files ?? []) {
-    if (!file.name) {
-      continue;
-    }
-    const resolved = resolveReference(cuePath, file.name);
+  for (const reference of references) {
+    const resolved = resolveReference(cuePath, reference);
     const matchedPath = discoveredByCaseInsensitivePath.get(normalizedPath(resolved)) ?? resolved;
     referencedFiles.push(matchedPath);
     if (!discoveredByCaseInsensitivePath.has(normalizedPath(resolved)) && !(await exists(matchedPath))) {

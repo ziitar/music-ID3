@@ -19,7 +19,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "cue-parser": "^0.3.0",
+    "chardet": "1.6.0",
+    "cue-parser": "0.3.0",
     "electron": "^44.2.0",
     "iconv-lite": "^0.7.3",
     "node-taglib-sharp": "^6.0.3",

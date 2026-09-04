@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { OpenDialogOptions } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { CookieSource, MetadataPatch, ScanProgress } from "../../shared/types";
+import type { CookieSource, CueEncoding, MetadataPatch, SaveCueInput, ScanProgress } from "../../shared/types";
 import type { CookieStore } from "../services/cookie-store";
 import { scanDirectory } from "../services/library-scanner";
 import { readAudioMetadata, writeAudioMetadata } from "../services/tag-service";
+import { readCue, saveCue } from "../services/cue-service";
 
 type IpcMainLike = {
   handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
@@ -39,6 +40,29 @@ function asMetadataPatch(value: unknown): MetadataPatch {
     throw new TypeError("Metadata patch must include fields and selectedFields");
   }
   return patch as MetadataPatch;
+}
+
+function asCueEncoding(value: unknown): CueEncoding {
+  if (["utf8", "utf8-bom", "gb18030", "gbk", "big5", "shift-jis"].includes(value as string)) {
+    return value as CueEncoding;
+  }
+  throw new TypeError("Unsupported CUE encoding");
+}
+
+function asSaveCueInput(value: unknown): SaveCueInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("CUE save input must be an object");
+  }
+  const input = value as Partial<SaveCueInput>;
+  if (!input.document || typeof input.document !== "object" || Array.isArray(input.document)) {
+    throw new TypeError("CUE save input must include a document");
+  }
+  return {
+    path: asString(input.path, "path"),
+    document: input.document as SaveCueInput["document"],
+    rawText: asString(input.rawText, "rawText"),
+    encoding: asCueEncoding(input.encoding)
+  };
 }
 
 function publishScanProgress(event: unknown, progress: ScanProgress): void {
@@ -88,11 +112,10 @@ export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore }: Re
   });
 
   ipcMain.handle(ipcChannels.readCue, (_event, cuePath) => {
-    asString(cuePath, "path");
-    return unavailable("CUE reads");
+    return readCue(asString(cuePath, "path"));
   });
 
-  ipcMain.handle(ipcChannels.saveCue, () => unavailable("CUE saves"));
+  ipcMain.handle(ipcChannels.saveCue, (_event, input) => saveCue(asSaveCueInput(input)));
 
   ipcMain.handle(ipcChannels.searchMetadata, (_event, source, query) => {
     asString(source, "source");
