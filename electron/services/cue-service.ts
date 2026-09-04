@@ -243,7 +243,10 @@ export function parseCue(rawText: string, filePath: string): CueDocumentState {
 }
 
 function quote(value: string): string {
-  return `"${value.replaceAll('"', "''")}"`;
+  if (value.includes('"')) {
+    throw new Error("Structured CUE values cannot contain a double quote; use raw mode to resolve the source text without data corruption");
+  }
+  return `"${value}"`;
 }
 
 type ModeledLine = { key: string; text: string };
@@ -630,9 +633,10 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
     writeFile,
     ...overrides
   };
+  const completedSaves = new Map<string, Promise<SaveCueResult>>();
 
-  async function readCueFile(filePath: string): Promise<CueDocumentState> {
-    const decoded = decodeCueBytes(await dependencies.readFile(filePath));
+  async function readCueFile(filePath: string, sourceEncoding?: CueEncoding): Promise<CueDocumentState> {
+    const decoded = decodeCueBytes(await dependencies.readFile(filePath), sourceEncoding);
     const state = parseCue(decoded.text, filePath);
     const referencedFiles = resolvedReferences(state.parsed, filePath);
     const missingReferencedFiles: string[] = [];
@@ -650,7 +654,7 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
     };
   }
 
-  async function saveCueFile(input: SaveCueInput): Promise<SaveCueResult> {
+  async function saveCueFileOnce(input: SaveCueInput): Promise<SaveCueResult> {
     const temporaryPath = `${input.path}.${randomUUID()}.tmp`;
     const temporaryPaths = new Set([temporaryPath]);
     try {
@@ -689,9 +693,10 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
             await dependencies.rename(backupTemporaryPath, input.path);
             temporaryPaths.delete(backupTemporaryPath);
           } catch (rollbackError) {
+            temporaryPaths.delete(backupTemporaryPath);
             const backupMessage = backupError instanceof Error ? backupError.message : String(backupError);
             const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-            throw new Error(`${backupMessage}; failed to restore original CUE: ${rollbackMessage}`);
+            throw new Error(`${backupMessage}; failed to restore original CUE: ${rollbackMessage}. Recovery copy retained at ${backupTemporaryPath}`);
           }
           throw backupError;
         }
@@ -707,6 +712,22 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
       }
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  function saveCueFile(input: SaveCueInput): Promise<SaveCueResult> {
+    if (typeof input.confirmationToken !== "string" || input.confirmationToken.trim() === "") {
+      return Promise.resolve({ ok: false, error: "CUE save requires a confirmation token" });
+    }
+    const key = `${path.resolve(input.path)}\0${input.confirmationToken}`;
+    const existing = completedSaves.get(key);
+    if (existing) return existing;
+    const operation = saveCueFileOnce(input);
+    completedSaves.set(key, operation);
+    if (completedSaves.size > 512) {
+      const oldest = completedSaves.keys().next().value as string | undefined;
+      if (oldest && oldest !== key) completedSaves.delete(oldest);
+    }
+    return operation;
   }
 
   return { readCue: readCueFile, saveCue: saveCueFile };

@@ -5,6 +5,7 @@ export type HttpTransportRequest = {
   url: string;
   method: "GET" | "POST";
   headers: Record<string, string>;
+  referrer?: string;
   body?: string | Uint8Array;
   signal: AbortSignal;
   maxResponseBytes: number;
@@ -43,6 +44,7 @@ export type HttpDiagnostic = {
 export type HttpRequestOptions = {
   method?: "GET" | "POST";
   headers?: Record<string, string>;
+  referrer?: string;
   getHeaders?: (signal: AbortSignal) => Promise<Record<string, string>>;
   prepareRequest?: (signal: AbortSignal) => Promise<PreparedHttpRequest>;
   body?: string | Uint8Array;
@@ -130,6 +132,7 @@ export function createElectronTransport(electronNet: {
       const result = await electronNet.fetch(currentUrl, {
         method: request.method,
         headers: currentHeaders,
+        ...(request.referrer ? { referrer: request.referrer } : {}),
         body,
         signal: request.signal,
         redirect: "manual",
@@ -378,6 +381,7 @@ export function createHttpClient(options: {
           url: prepared.url,
           method,
           headers: prepared.headers,
+          ...(requestOptions.referrer ? { referrer: requestOptions.referrer } : {}),
           body: prepared.body,
           signal: controller.signal,
           maxResponseBytes,

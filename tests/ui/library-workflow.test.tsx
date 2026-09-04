@@ -23,6 +23,7 @@ describe("library editing workflow", () => {
       selectDirectory: vi.fn(async () => "D:/音乐"),
       scanDirectory: vi.fn(async () => ({ ok: true, scanId: "scan-1" })),
       cancelScan: vi.fn(async () => undefined),
+      setWholeTrackOverride: vi.fn(async () => undefined),
       readAudio: vi.fn(async () => audioItem().metadata),
       writeAudio: vi.fn(async (_path, patch) => ({ ok: true, metadata: { ...audioItem().metadata, common: { ...audioItem().metadata.common, ...patch.fields } } })),
       readCue: vi.fn(), saveCue: vi.fn(async () => ({ ok: true, path: "D:/音乐/album.cue", backupPath: "D:/音乐/album.cue.bak" })),
@@ -47,7 +48,7 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledWith("D:/音乐", expect.any(String)));
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() });
     expect(await screen.findByText("track.flac")).toBeInTheDocument();
-    expect(screen.getByText(/suspected/i)).toBeInTheDocument();
+    expect(screen.getByTestId("library-row")).toHaveTextContent("suspected");
   });
 
   it("guides suspected whole-track files to CUE flow and supports override", async () => {
@@ -58,7 +59,28 @@ describe("library editing workflow", () => {
     fireEvent.click(await screen.findByText("track.flac"));
     expect(screen.getByText(/whole-track cue candidate/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /use normal audio editing/i }));
-    expect(screen.queryByText(/whole-track cue candidate/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/whole-track cue candidate/i)).not.toBeInTheDocument());
+  });
+
+  it("disables every ordinary tag mutation for suspected audio until main accepts the override", async () => {
+    let acceptOverride!: () => void;
+    vi.mocked(window.musicId3.setWholeTrackOverride).mockImplementation(() => new Promise<void>((resolve) => { acceptOverride = resolve; }));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() });
+    fireEvent.click(await screen.findByText("track.flac"));
+
+    expect(screen.getByRole("checkbox", { name: /^title$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /remove cover/i })).toBeDisabled();
+    expect(screen.getByLabelText(/cover file/i)).toBeDisabled();
+    expect(screen.getByRole("button", { name: /preview diff/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /use normal audio editing/i }));
+    expect(window.musicId3.setWholeTrackOverride).toHaveBeenCalledWith("D:/音乐/track.flac", true);
+    expect(screen.getByLabelText(/title value/i)).toBeDisabled();
+    acceptOverride();
+    await waitFor(() => expect(screen.getByLabelText(/title value/i)).toBeEnabled());
   });
 
   it("clears stale editor details when a new scan begins", async () => {
@@ -99,6 +121,20 @@ describe("library editing workflow", () => {
     expect(screen.getByText(/\.bak/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalled());
+  });
+
+  it("consumes CUE confirmation synchronously so rapid repeated activation invokes one save token", async () => {
+    vi.mocked(window.musicId3.saveCue).mockResolvedValue({ ok: true, path: "D:/音乐/album.cue", backupPath: "D:/音乐/album.cue.bak" });
+    const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: "", parsed: { remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /save cue/i }));
+    const confirmation = screen.getByRole("button", { name: /confirm cue save/i });
+
+    fireEvent.click(confirmation);
+    fireEvent.click(confirmation);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(window.musicId3.saveCue).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(window.musicId3.saveCue).mock.calls[0][0]).toMatchObject({ confirmationToken: expect.any(String) });
   });
 
   it("refreshes the library and editor from disk after a successful CUE save", async () => {
@@ -405,7 +441,7 @@ describe("library editing workflow", () => {
     fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
 
     expect(await screen.findByText("Write rejected")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /confirm candidate write/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument();
     expect(window.musicId3.readAudio).not.toHaveBeenCalled();
   });
 
@@ -503,7 +539,78 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", trackCount: 1, confidence: "low" }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", offsets: [150], tracks: [{ number: 1, title: "First" }], confidence: "high", cover: { mimeType: "image/jpeg", data: "AQID" } });
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); await screen.findByText("Candidate release"); fireEvent.click(screen.getByRole("button", { name: /apply candidate/i }));
-    expect(await screen.findByDisplayValue("Candidate release")).toBeInTheDocument(); expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledWith("musicbrainz", "release"); expect(window.musicId3.buildCandidateCue).toHaveBeenCalledWith(expect.objectContaining({ audioPath: "D:/音乐/track.flac", candidate: expect.objectContaining({ offsets: [150] }) })); expect(screen.getByText(/musicbrainz release/i)).toBeInTheDocument(); expect(screen.getByAltText("candidate cover")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("Candidate release")).toBeInTheDocument(); expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledWith("musicbrainz", "release", expect.objectContaining({ title: "Old title", artist: "Artist", durationMs: 215_000 })); expect(window.musicId3.buildCandidateCue).toHaveBeenCalledWith(expect.objectContaining({ audioPath: "D:/音乐/track.flac", candidate: expect.objectContaining({ offsets: [150] }) })); expect(screen.getByText(/musicbrainz release/i)).toBeInTheDocument(); expect(screen.getByAltText("candidate cover")).toBeInTheDocument();
+  });
+
+  it("shows generated CUE provenance and warns before saving a low-confidence inferred candidate", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "release", releaseId: "release", mediumPosition: 2, source: "musicbrainz", title: "Candidate release", artist: "Artist", trackCount: 1, confidence: "low" }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "release", releaseId: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", discId: "disc-2", offsets: [150], tracks: [{ number: 1, title: "First" }], confidence: "low", evidence: ["Track count matched"] });
+    vi.mocked(window.musicId3.buildCandidateCue).mockResolvedValue({ title: "Candidate release", performer: "Artist", remarks: [], files: [{ path: "track.flac", type: "WAVE" }], tracks: [{ number: 1, title: "First", indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [], provenance: { source: "musicbrainz", releaseId: "release", discId: "disc-2", confidence: "low", evidence: ["Track count matched"], inferred: true } });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "Candidate release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i }));
+
+    expect(await screen.findByText(/release id: release/i)).toBeInTheDocument();
+    expect(screen.getByText(/disc id: disc-2/i)).toBeInTheDocument();
+    expect(screen.getByText(/track count matched/i)).toBeInTheDocument();
+    expect(screen.getByText(/confidence: low/i)).toBeInTheDocument();
+    expect(screen.getByText(/inferred candidate/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/encoding/i)).toHaveValue("utf8-bom");
+    fireEvent.click(screen.getByRole("button", { name: /save cue/i }));
+    expect(screen.getByText(/review this inferred, low-confidence candidate/i)).toBeInTheDocument();
+    expect(screen.queryByText(/saving creates a \.bak/i)).not.toBeInTheDocument();
+  });
+
+  it("re-decodes original CUE bytes when an uncertain source encoding is selected", async () => {
+    const cue: LibraryItem = { kind: "cue", path: "D:/音乐/旧编码.cue", encoding: "gbk", rawText: 'TITLE "错误预览"', parsed: { title: "错误预览", remarks: [], files: [{ path: "disc.flac" }], tracks: [{ number: 1, indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [], candidateEncodings: ["gbk", "big5"] };
+    vi.mocked(window.musicId3.readCue).mockResolvedValue({ ...cue, encoding: "big5", rawText: 'TITLE "正确预览"', parsed: { ...cue.parsed, title: "正确预览" } });
+    render(<StrictMode><App /></StrictMode>); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("旧编码.cue"));
+
+    fireEvent.click(screen.getByRole("button", { name: /big5/i }));
+
+    await waitFor(() => expect(window.musicId3.readCue).toHaveBeenCalledWith(cue.path, "big5"));
+    expect(screen.getByDisplayValue("正确预览")).toBeInTheDocument();
+  });
+
+  it("offers every common metadata field with numeric selection semantics", async () => {
+    const item = audioItem({ wholeTrackStatus: "normal", metadata: { ...audioItem().metadata, common: { ...audioItem().metadata.common, trackNumber: 2, trackTotal: 11, discNumber: 1, discTotal: 2, composer: "Composer", lyrics: "Lyrics", copyright: "Copyright" } } });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item }); fireEvent.click(await screen.findByText("track.flac"));
+
+    for (const field of ["trackNumber", "trackTotal", "discNumber", "discTotal", "composer", "lyrics", "copyright"]) {
+      expect(screen.getByRole("checkbox", { name: field })).toBeInTheDocument();
+      expect(screen.getByLabelText(`${field} value`)).toBeInTheDocument();
+    }
+    fireEvent.change(screen.getByLabelText("trackNumber value"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "trackNumber" }));
+    fireEvent.click(screen.getByRole("button", { name: /preview diff/i }));
+    fireEvent.click(screen.getByRole("button", { name: /write selected fields/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith(item.path, expect.objectContaining({ fields: { trackNumber: 3 }, selectedFields: ["trackNumber"] })));
+  });
+
+  it("defaults and resets candidate queries from the selected item context", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/song.flac", fileName: "song.flac", wholeTrackStatus: "normal", metadata: { common: { artist: "Artist", title: "Song" }, raw: {}, durationMs: 10 } }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/disc.flac", fileName: "disc.flac", metadata: { common: { artist: "Album Artist", album: "Album" }, raw: {}, durationMs: 901_000 } }) });
+    fireEvent.click(await screen.findByText("song.flac"));
+    expect(screen.getByLabelText(/candidate query/i)).toHaveValue("Artist Song");
+    fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "custom" } });
+    fireEvent.click(screen.getByText("disc.flac"));
+    expect(screen.getByLabelText(/candidate query/i)).toHaveValue("Album Artist Album");
+  });
+
+  it("navigates a recursive directory hierarchy and filters the current library view", async () => {
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/root.mp3", fileName: "root.mp3", extension: ".mp3", wholeTrackStatus: "normal" }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/现场/live.flac", fileName: "live.flac", wholeTrackStatus: "normal" }) });
+    await screen.findByText("live.flac");
+
+    fireEvent.click(screen.getByRole("button", { name: "现场" }));
+    expect(screen.queryByText("root.mp3")).not.toBeInTheDocument();
+    expect(screen.getByText("live.flac")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/library search/i), { target: { value: "missing" } });
+    expect(screen.queryByText("live.flac")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/library search/i), { target: { value: "live" } });
+    fireEvent.change(screen.getByLabelText(/format filter/i), { target: { value: ".flac" } });
+    expect(screen.getByText("live.flac")).toBeInTheDocument();
   });
 
   it("blocks invalid raw CUE saves and shows validation errors", async () => {

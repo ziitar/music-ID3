@@ -82,10 +82,12 @@ export function createQqMusicAdapter(options: {
 }): MetadataAdapter {
   function requestOptions(
     cacheKey: string,
-    prepare: (cookie: string | undefined) => { url: string; headers: Record<string, string> }
+    prepare: (cookie: string | undefined) => { url: string; headers: Record<string, string> },
+    referrer: string
   ): HttpRequestOptions {
     return {
       headers: { Accept: "application/json" },
+      referrer,
       prepareRequest: async () => {
         const cookie = await options.cookieStore.get("qq");
         const prepared = prepare(cookie);
@@ -122,9 +124,9 @@ export function createQqMusicAdapter(options: {
       });
       return {
         url: `${baseUrl}?${params}`,
-        headers: { Referer: "https://c.y.qq.com/", Host: "c.y.qq.com" }
+        headers: {}
       };
-    }));
+    }, "https://c.y.qq.com/"));
     return (result.data?.song?.list ?? result.data?.songlist ?? []).map(mapSong);
   }
 
@@ -148,12 +150,10 @@ export function createQqMusicAdapter(options: {
         return {
           url: `${baseUrl}?${params}`,
           headers: {
-            Referer: "https://y.qq.com/portal/player.html",
-            Host: "u.y.qq.com",
             "Content-Type": "application/x-www-form-urlencoded"
           }
         };
-      }));
+      }, "https://y.qq.com/portal/player.html"));
       const dataResult = result.songinfo?.data;
       const song = dataResult && "track_info" in dataResult ? dataResult.track_info : dataResult;
       if (!song) throw new Error("QQ Music returned no song details");
@@ -163,7 +163,8 @@ export function createQqMusicAdapter(options: {
     async getCover(candidate) {
       if (!candidate.coverUrl) return undefined;
       const result = await options.http.getBytes("qq", safeCoverUrl(candidate.coverUrl), {
-        headers: { Accept: "image/*", Referer: "https://y.qq.com/" },
+        headers: { Accept: "image/*" },
+        referrer: "https://y.qq.com/",
         maxResponseBytes: coverMaxBytes,
         cacheTtlMs: sessionCacheTtlMs,
         cacheKey: `qq:cover:${candidate.coverUrl}`,

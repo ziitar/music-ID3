@@ -103,7 +103,8 @@ describe("CUE service", () => {
       path: cuePath,
       document: validDocument,
       rawText,
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "dangling-audio"
     });
 
     expect(state.parseError).toMatch(/TRACK 02.*INDEX 01/i);
@@ -127,7 +128,7 @@ describe("CUE service", () => {
       unknownLines: []
     };
 
-    const saved = await createCueService().saveCue({ path: cuePath, document: submitted, rawText, encoding: "utf8" });
+    const saved = await createCueService().saveCue({ path: cuePath, document: submitted, rawText, encoding: "utf8", confirmationToken: "dangling-data" });
 
     expect(state.parseError).toMatch(/TRACK 02.*INDEX 01/i);
     expect(saved).toEqual({ ok: false, error: expect.stringMatching(/TRACK 02.*INDEX 01/i) });
@@ -159,7 +160,8 @@ describe("CUE service", () => {
       path: cuePath,
       document,
       rawText: document.sourceText,
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "forged-source"
     })).resolves.toEqual({ ok: false, error: expect.any(String) });
     await expect(readFile(cuePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -185,7 +187,8 @@ describe("CUE service", () => {
       path: cuePath,
       document,
       rawText: differentRawText,
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "different-projection"
     });
 
     expect(result).toEqual({ ok: true, path: cuePath });
@@ -538,7 +541,8 @@ describe("CUE service", () => {
       path: cuePath,
       document: replacement,
       rawText: "",
-      encoding: "utf8-bom"
+      encoding: "utf8-bom",
+      confirmationToken: "replace-with-bom"
     });
 
     expect(result).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
@@ -556,7 +560,7 @@ describe("CUE service", () => {
       unknownLines: []
     };
 
-    const result = await createCueService().saveCue({ path: cuePath, document, rawText: "", encoding: "utf8" });
+    const result = await createCueService().saveCue({ path: cuePath, document, rawText: "", encoding: "utf8", confirmationToken: "new-cue" });
 
     expect(result).toEqual({ ok: true, path: cuePath });
     await expect(readFile(`${cuePath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
@@ -578,7 +582,7 @@ describe("CUE service", () => {
       rename: async () => { throw new Error("replace denied"); }
     });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8" });
+    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-denied" });
 
     expect(result).toEqual({ ok: false, error: "replace denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);
@@ -603,7 +607,7 @@ describe("CUE service", () => {
     await writeFile(backupPath, priorBackup);
     const service = createCueService({ rename: async () => { throw new Error("replace denied"); } });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8" });
+    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-with-backup-denied" });
 
     expect(result).toEqual({ ok: false, error: "replace denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);
@@ -629,11 +633,67 @@ describe("CUE service", () => {
       path: cuePath,
       document: replacement,
       rawText: "",
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "replace-prior-backup"
     });
 
     expect(result).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
     expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("keeps the original backup when the same confirmation token is submitted twice", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "duplicate.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    const service = createCueService();
+    const input = { path: cuePath, document: replacement, rawText: "", encoding: "utf8" as const, confirmationToken: "same-confirmation" };
+
+    const first = await service.saveCue(input);
+    const duplicate = await service.saveCue(input);
+
+    expect(first).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
+    expect(duplicate).toEqual(first);
+    expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("retains and surfaces the only original recovery copy when backup publication and rollback both fail", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "recovery.cue");
+    const backupPath = `${cuePath}.bak`;
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const priorBackup = 'TITLE "Prior backup"';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    await writeFile(backupPath, priorBackup);
+    const service = createCueService({
+      rename: async (source, destination) => {
+        if (destination === backupPath) throw new Error("backup publish denied");
+        if (destination === cuePath && source.includes(".bak.")) throw new Error("rollback denied");
+        await rename(source, destination);
+      }
+    });
+
+    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "recovery-confirmation" });
+    const files = await readdir(directory);
+    const contents = await Promise.all(files.map((name) => readFile(path.join(directory, name), "utf8")));
+
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/recovery copy.*\.tmp/i) });
+    expect(contents).toContain(original);
+    expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
   });
 
   it("restores the original and preserves the prior backup when backup publication fails", async () => {
@@ -660,11 +720,23 @@ describe("CUE service", () => {
       }
     });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8" });
+    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "backup-publication-denied" });
 
     expect(result).toEqual({ ok: false, error: "backup publish denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);
     expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
     expect((await readdir(directory)).sort()).toEqual(["album.cue", "album.cue.bak"]);
+  });
+
+  it("rejects embedded double quotes in structured values instead of changing their text", () => {
+    const document: CueDocument = {
+      title: 'A "quoted" album',
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+
+    expect(() => serializeCue(document, "utf8")).toThrow(/double quote.*raw mode/i);
   });
 });

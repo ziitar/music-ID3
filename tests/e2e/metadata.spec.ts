@@ -4,7 +4,7 @@ import { expect, test } from "./electron-fixture";
 
 async function openEditable(page: import("playwright/test").Page) {
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("library-count")).toHaveText("12 items");
+  await expect(page.getByTestId("library-count")).toHaveText("13 items");
   await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
 }
 
@@ -79,3 +79,24 @@ test("catches provider failures leaking secrets or blocking later local writes",
   await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
   await expect(page.getByRole("textbox", { name: "comment value", exact: true })).toHaveValue("Local write after provider outage");
 });
+
+for (const provider of [
+  { value: "netease", label: "NetEase", query: "Mystery of Love", title: "Mystery of Love", artist: "Sufjan Stevens", album: "Call Me by Your Name" },
+  { value: "qq", label: "QQ Music", query: "Mojito", title: "Mojito", artist: "Jay Chou", album: "Mojito" }
+] as const) {
+  test(`completes the offline ${provider.label} candidate workflow`, async ({ page }) => {
+    await openEditable(page);
+    await page.getByLabel("provider", { exact: true }).selectOption(provider.value);
+    await page.getByLabel("candidate query").fill(provider.query);
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const candidate = page.getByTestId("metadata-candidate").filter({ hasText: provider.title });
+    await expect(candidate).toContainText(provider.artist);
+    await candidate.getByRole("button", { name: "Load candidate details" }).click();
+    await expect(candidate.getByAltText("candidate cover")).toBeVisible();
+    await candidate.getByRole("button", { name: "Apply candidate" }).click();
+    await page.getByRole("button", { name: "confirm candidate write" }).click();
+    await expect(page.getByRole("textbox", { name: "title value", exact: true })).toHaveValue(provider.title);
+    await expect(page.getByRole("textbox", { name: "artist value", exact: true })).toHaveValue(provider.artist);
+    await expect(page.getByRole("textbox", { name: "album value", exact: true })).toHaveValue(provider.album);
+  });
+}

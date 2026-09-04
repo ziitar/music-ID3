@@ -1,11 +1,11 @@
 import { useSyncExternalStore } from "react";
-import type { AudioMetadata, CueDocument, LibraryItem, MetadataCandidate, MetadataPatch, MetadataSource, SaveCueInput, SaveCueResult, WriteResult } from "../../shared/types";
+import type { AudioMetadata, CueDocument, LibraryItem, MetadataCandidate, MetadataPatch, MetadataSearchContext, MetadataSource, SaveCueInput, SaveCueResult, WriteResult } from "../../shared/types";
 import type { MusicId3Api } from "../../shared/ipc";
 
 export type DiffEntry = { field: string; oldValue: unknown; newValue: unknown };
 export type EditorState = { generation: number; item?: LibraryItem; draft: Record<string, unknown>; selectedFields: string[]; diff: DiffEntry[]; candidates: MetadataCandidate[]; searching: boolean; searchCompleted: boolean; cueDraft?: CueDocument; candidateSource?: string; error?: string };
 export type EditorOwnership = { path: string; generation: number };
-export type AudioWriteConfirmation = EditorOwnership & { selectedFields: string[]; fields: Record<string, unknown>; diff: DiffEntry[] };
+export type AudioWriteConfirmation = EditorOwnership & { readonly token: string; readonly selectedFields: readonly string[]; readonly fields: Readonly<Record<string, unknown>>; readonly diff: readonly DiffEntry[] };
 export type AudioWriteOutcome = WriteResult & { path: string; operation: number; latest: boolean };
 export type CueSaveOutcome = SaveCueResult & { path: string; operation: number; latest: boolean };
 
@@ -20,25 +20,82 @@ function equalValue(left: unknown, right: unknown): boolean {
   return false;
 }
 
+function immutableClone(value: unknown): unknown {
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableClone));
+  if (value && typeof value === "object") {
+    return Object.freeze(Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, immutableClone(entry)])));
+  }
+  return value;
+}
+
+function localMatchContext(item: LibraryItem | undefined): MetadataSearchContext | undefined {
+  if (!item) return undefined;
+  if (item.kind === "audio") {
+    const common = item.metadata.common;
+    return {
+      ...(common.title ? { title: common.title } : {}),
+      ...(common.artist ? { artist: common.artist } : {}),
+      ...(item.durationMs > 0 ? { durationMs: item.durationMs } : {})
+    };
+  }
+  return {
+    ...(item.parsed.title ? { title: item.parsed.title } : {}),
+    ...(item.parsed.performer ? { artist: item.parsed.performer } : {}),
+    ...(item.parsed.tracks.length ? { trackCount: item.parsed.tracks.length } : {})
+  };
+}
+
+function candidateFieldValue(candidate: MetadataCandidate, field: string): unknown {
+  if (field === "date" && candidate.date) {
+    return candidate.date.match(/^\d{4}/)?.[0] ?? candidate.date;
+  }
+  return field === "title" ? candidate.title : candidate[field as keyof MetadataCandidate];
+}
+
 export function createEditorStore(bridge?: MusicId3Api) {
   let state: EditorState = { generation: 0, draft: {}, selectedFields: [], diff: [], candidates: [], searching: false, searchCompleted: false };
   let candidateGeneration = 0;
   let editorGeneration = 0;
+  let audioPreviewSequence = 0;
+  let activeAudioPreviewToken: string | undefined;
   const writeGenerations = new Map<string, number>();
   const writeQueues = new Map<string, Promise<void>>();
   const cueSaveGenerations = new Map<string, number>();
   const cueSaveQueues = new Map<string, Promise<void>>();
+  const consumedCueTokens = new Set<string>();
   const listeners = new Set<() => void>(); const emit = () => listeners.forEach((listener) => listener());
   const captureOwnership = (): EditorOwnership | undefined => state.item ? { path: state.item.path, generation: editorGeneration } : undefined;
   const isCurrentOwnership = (ownership: EditorOwnership) => editorGeneration === ownership.generation && state.item?.path === ownership.path;
-  const captureAudioWriteConfirmation = (): AudioWriteConfirmation | undefined => state.item?.kind === "audio" ? {
-    path: state.item.path, generation: editorGeneration, selectedFields: [...state.selectedFields],
-    fields: Object.fromEntries(state.selectedFields.map((field) => [field, state.draft[field]])), diff: state.diff.map((entry) => ({ ...entry }))
-  } : undefined;
+  const currentDiff = (): DiffEntry[] => {
+    const oldValues = state.item?.kind === "audio" ? state.item.metadata.common : {};
+    return state.selectedFields.map((field) => ({ field, oldValue: oldValues[field as keyof typeof oldValues], newValue: state.draft[field] }));
+  };
+  const installDiff = (diff: DiffEntry[]): void => {
+    activeAudioPreviewToken = diff.length > 0 ? `audio-preview-${editorGeneration}-${++audioPreviewSequence}` : undefined;
+    state = { ...state, diff };
+  };
+  const invalidateAudioPreview = (): void => {
+    activeAudioPreviewToken = undefined;
+    if (state.diff.length > 0) state = { ...state, diff: [] };
+  };
+  const captureAudioWriteConfirmation = (): AudioWriteConfirmation | undefined => {
+    if (state.item?.kind !== "audio" || state.item.wholeTrackStatus === "suspected" || !activeAudioPreviewToken || state.diff.length === 0) return undefined;
+    const recomputed = currentDiff();
+    if (!equalValue(recomputed, state.diff)) return undefined;
+    return Object.freeze({
+      path: state.item.path,
+      generation: editorGeneration,
+      token: activeAudioPreviewToken,
+      selectedFields: immutableClone(state.selectedFields) as readonly string[],
+      fields: immutableClone(Object.fromEntries(state.selectedFields.map((field) => [field, state.draft[field]]))) as Readonly<Record<string, unknown>>,
+      diff: immutableClone(recomputed) as readonly DiffEntry[]
+    });
+  };
   const isAudioWriteConfirmationCurrent = (confirmation: AudioWriteConfirmation) => {
-    if (!isCurrentOwnership(confirmation) || state.item?.kind !== "audio") return false;
+    if (!isCurrentOwnership(confirmation) || state.item?.kind !== "audio" || state.item.wholeTrackStatus === "suspected" || activeAudioPreviewToken !== confirmation.token) return false;
     const currentFields = Object.fromEntries(state.selectedFields.map((field) => [field, state.draft[field]]));
-    return equalValue(confirmation.selectedFields, state.selectedFields) && equalValue(confirmation.fields, currentFields) && equalValue(confirmation.diff, state.diff);
+    const recomputed = currentDiff();
+    return equalValue(confirmation.selectedFields, state.selectedFields) && equalValue(confirmation.fields, currentFields) && equalValue(confirmation.diff, recomputed) && equalValue(confirmation.diff, state.diff);
   };
   return {
     getState: () => state,
@@ -50,19 +107,22 @@ export function createEditorStore(bridge?: MusicId3Api) {
     isAudioWriteConfirmationCurrent,
     isLatestAudioWrite: (path: string, operation: number) => writeGenerations.get(path) === operation,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
-    setItem: (item?: LibraryItem) => { candidateGeneration += 1; editorGeneration += 1; const common = item?.kind === "audio" ? item.metadata.common : {}; state = { generation: editorGeneration, item, draft: { ...common }, selectedFields: [], diff: [], candidates: [], searching: false, searchCompleted: false, error: undefined }; emit(); },
-    setField: (field: string, value: unknown) => { state = { ...state, draft: { ...state.draft, [field]: value } }; emit(); },
+    setItem: (item?: LibraryItem) => { candidateGeneration += 1; editorGeneration += 1; activeAudioPreviewToken = undefined; const common = item?.kind === "audio" ? item.metadata.common : {}; state = { generation: editorGeneration, item, draft: { ...common }, selectedFields: [], diff: [], candidates: [], searching: false, searchCompleted: false, error: undefined }; emit(); },
+    setField: (field: string, value: unknown) => { invalidateAudioPreview(); state = { ...state, draft: { ...state.draft, [field]: value } }; emit(); },
     setError: (error?: string) => { state = { ...state, error }; emit(); },
-    setFieldSelected: (field: string, selected: boolean) => { state = { ...state, selectedFields: selected ? [...new Set([...state.selectedFields, field])] : state.selectedFields.filter((entry) => entry !== field) }; emit(); },
-    previewDiff: () => { const oldValues = state.item?.kind === "audio" ? state.item.metadata.common : {}; const diff = state.selectedFields.map((field) => ({ field, oldValue: oldValues[field as keyof typeof oldValues], newValue: state.draft[field] })); state = { ...state, diff }; emit(); return diff; },
-    loadCandidateDetails: async (candidate: MetadataCandidate) => { const currentApi = bridge ?? api(); const currentItem = state.item; if (!currentItem || !currentApi) return; const generation = ++candidateGeneration; const targetPath = currentItem.path; try { const resolved = await currentApi.getMetadataCandidate(candidate.source, candidate.id); if (generation !== candidateGeneration || state.item?.path !== targetPath) return; state = { ...state, candidates: state.candidates.map((entry) => entry.source === candidate.source && entry.id === candidate.id ? resolved : entry), error: undefined }; emit(); return resolved; } catch { if (generation !== candidateGeneration || state.item?.path !== targetPath) return; state = { ...state, error: "Unable to load candidate details" }; emit(); } },
-    applyCandidate: async (candidate: MetadataCandidate, selectedFields: string[], detailsLoaded = false) => { const currentApi = bridge ?? api(); const currentItem = state.item; if (!currentItem || !currentApi) return; const generation = ++candidateGeneration; const targetPath = currentItem.path; const targetKind = currentItem.kind; const isCurrent = () => generation === candidateGeneration && state.item?.path === targetPath && state.item.kind === targetKind; let resolved: MetadataCandidate; if (detailsLoaded) resolved = candidate; else try { resolved = await currentApi.getMetadataCandidate(candidate.source, candidate.id); if (!isCurrent()) return; state = { ...state, candidates: state.candidates.map((entry) => entry.source === candidate.source && entry.id === candidate.id ? resolved : entry), error: undefined }; emit(); } catch { if (!isCurrent()) return; state = { ...state, error: "Unable to load candidate details" }; emit(); return; } if ((currentItem.kind === "cue" || currentItem.wholeTrackStatus === "suspected") && resolved.source === "musicbrainz") { const audioPath = currentItem.kind === "audio" ? currentItem.path : currentItem.referencedFiles[0]; if (!audioPath) { state = { ...state, error: "CUE candidate needs a referenced audio file" }; emit(); return; } try { const cueDraft = await currentApi.buildCandidateCue({ audioPath, candidate: resolved }); if (!isCurrent()) return; state = { ...state, cueDraft, candidateSource: `${resolved.source} release`, error: undefined }; emit(); return { candidate: resolved, cueDraft }; } catch { if (!isCurrent()) return; state = { ...state, error: "Unable to build candidate CUE" }; emit(); return; } } if (!isCurrent()) return; const applicableFields = selectedFields.filter((field) => field === "title" || resolved[field as keyof MetadataCandidate] !== undefined); if (applicableFields.length === 0) { state = { ...state, selectedFields: [], diff: [], error: "No applicable candidate fields selected" }; emit(); return; } const fieldValues: Record<string, unknown> = { title: resolved.title, artist: resolved.artist, album: resolved.album, date: resolved.date, cover: resolved.cover }; const draft = { ...state.draft }; for (const field of applicableFields) draft[field] = fieldValues[field]; state = { ...state, draft, selectedFields: applicableFields, diff: applicableFields.map((field) => ({ field, oldValue: currentItem.kind === "audio" ? currentItem.metadata.common[field as keyof AudioMetadata["common"]] : undefined, newValue: draft[field] })), error: undefined }; emit(); return { candidate: resolved }; },
+    setFieldSelected: (field: string, selected: boolean) => { invalidateAudioPreview(); state = { ...state, selectedFields: selected ? [...new Set([...state.selectedFields, field])] : state.selectedFields.filter((entry) => entry !== field) }; emit(); },
+    previewDiff: () => { const diff = state.item?.kind === "audio" && state.item.wholeTrackStatus !== "suspected" ? currentDiff() : []; installDiff(diff); emit(); return diff; },
+    loadCandidateDetails: async (candidate: MetadataCandidate) => { const currentApi = bridge ?? api(); const currentItem = state.item; if (!currentItem || !currentApi) return; const generation = ++candidateGeneration; const targetPath = currentItem.path; try { const resolved = await currentApi.getMetadataCandidate(candidate.source, candidate.id, localMatchContext(currentItem)); if (generation !== candidateGeneration || state.item?.path !== targetPath) return; state = { ...state, candidates: state.candidates.map((entry) => entry.source === candidate.source && entry.id === candidate.id ? resolved : entry), error: undefined }; emit(); return resolved; } catch { if (generation !== candidateGeneration || state.item?.path !== targetPath) return; state = { ...state, error: "Unable to load candidate details" }; emit(); } },
+    applyCandidate: async (candidate: MetadataCandidate, selectedFields: string[], detailsLoaded = false) => { const currentApi = bridge ?? api(); const currentItem = state.item; if (!currentItem || !currentApi) return; const generation = ++candidateGeneration; const targetPath = currentItem.path; const targetKind = currentItem.kind; const isCurrent = () => generation === candidateGeneration && state.item?.path === targetPath && state.item.kind === targetKind; let resolved: MetadataCandidate; if (detailsLoaded) resolved = candidate; else try { resolved = await currentApi.getMetadataCandidate(candidate.source, candidate.id, localMatchContext(currentItem)); if (!isCurrent()) return; state = { ...state, candidates: state.candidates.map((entry) => entry.source === candidate.source && entry.id === candidate.id ? resolved : entry), error: undefined }; emit(); } catch { if (!isCurrent()) return; state = { ...state, error: "Unable to load candidate details" }; emit(); return; } if ((currentItem.kind === "cue" || currentItem.wholeTrackStatus === "suspected") && resolved.source === "musicbrainz") { const audioPath = currentItem.kind === "audio" ? currentItem.path : currentItem.referencedFiles[0]; if (!audioPath) { state = { ...state, error: "CUE candidate needs a referenced audio file" }; emit(); return; } try { const cueDraft = await currentApi.buildCandidateCue({ audioPath, candidate: resolved }); if (!isCurrent()) return; activeAudioPreviewToken = undefined; state = { ...state, cueDraft, candidateSource: `${resolved.source} release`, diff: [], error: undefined }; emit(); return { candidate: resolved, cueDraft }; } catch { if (!isCurrent()) return; state = { ...state, error: "Unable to build candidate CUE" }; emit(); return; } } if (!isCurrent() || currentItem.kind !== "audio" || currentItem.wholeTrackStatus === "suspected") return; const applicableFields = selectedFields.filter((field) => candidateFieldValue(resolved, field) !== undefined); if (applicableFields.length === 0) { activeAudioPreviewToken = undefined; state = { ...state, selectedFields: [], diff: [], error: "No applicable candidate fields selected" }; emit(); return; } const draft = { ...state.draft }; for (const field of applicableFields) draft[field] = candidateFieldValue(resolved, field); state = { ...state, draft, selectedFields: applicableFields, error: undefined }; installDiff(applicableFields.map((field) => ({ field, oldValue: currentItem.metadata.common[field as keyof AudioMetadata["common"]], newValue: draft[field] }))); emit(); return { candidate: resolved }; },
     confirmAudioWrite: async (expected?: AudioWriteConfirmation): Promise<AudioWriteOutcome | undefined> => {
       const currentApi = bridge ?? api(); const confirmation = expected ?? captureAudioWriteConfirmation();
       if (!currentApi || !confirmation || !isAudioWriteConfirmationCurrent(confirmation)) return;
       const currentItem = state.item as Extract<LibraryItem, { kind: "audio" }>;
+      activeAudioPreviewToken = undefined;
+      state = { ...state, diff: [] };
+      emit();
       const operation = (writeGenerations.get(confirmation.path) ?? 0) + 1; writeGenerations.set(confirmation.path, operation);
-      const patch = { fields: confirmation.fields, selectedFields: confirmation.selectedFields as (keyof AudioMetadata["common"])[] } as MetadataPatch;
+      const patch = { fields: confirmation.fields, selectedFields: [...confirmation.selectedFields] as (keyof AudioMetadata["common"])[] } as MetadataPatch;
       const prior = writeQueues.get(confirmation.path);
       const write = prior ? prior.catch(() => undefined).then(() => currentApi.writeAudio(confirmation.path, patch)) : currentApi.writeAudio(confirmation.path, patch);
       const queued = write.then(() => undefined, () => undefined); writeQueues.set(confirmation.path, queued);
@@ -75,7 +135,9 @@ export function createEditorStore(bridge?: MusicId3Api) {
     },
     saveCueDraft: async (input: SaveCueInput, expected?: EditorOwnership): Promise<CueSaveOutcome | undefined> => {
       const currentApi = bridge ?? api(); const ownership = expected ?? captureOwnership();
-      if (!currentApi || !ownership || !isCurrentOwnership(ownership)) return;
+      if (!currentApi || !ownership || !isCurrentOwnership(ownership) || !input.confirmationToken || consumedCueTokens.has(input.confirmationToken)) return;
+      consumedCueTokens.add(input.confirmationToken);
+      if (consumedCueTokens.size > 1024) consumedCueTokens.delete(consumedCueTokens.values().next().value as string);
       const operation = (cueSaveGenerations.get(input.path) ?? 0) + 1; cueSaveGenerations.set(input.path, operation);
       const prior = cueSaveQueues.get(input.path);
       const save = prior ? prior.catch(() => undefined).then(() => currentApi.saveCue(input)) : currentApi.saveCue(input);
@@ -87,7 +149,7 @@ export function createEditorStore(bridge?: MusicId3Api) {
       } catch { if (cueSaveGenerations.get(input.path) === operation && isCurrentOwnership(ownership)) { state = { ...state, error: "Unable to save CUE" }; emit(); } }
       finally { if (cueSaveQueues.get(input.path) === queued) cueSaveQueues.delete(input.path); }
     },
-    searchCandidates: async (source: MetadataSource, query: string) => { const currentApi = bridge ?? api(); const generation = ++candidateGeneration; const targetPath = state.item?.path; state = { ...state, searching: true, searchCompleted: false, error: undefined }; emit(); const isCurrent = () => generation === candidateGeneration && state.item?.path === targetPath; try { const candidates = await currentApi?.searchMetadata(source, query) ?? []; if (!isCurrent()) return []; state = { ...state, candidates, searching: false, searchCompleted: true }; emit(); return candidates; } catch { if (!isCurrent()) return []; state = { ...state, searching: false, searchCompleted: true, error: "Metadata search failed" }; emit(); return []; } }
+    searchCandidates: async (source: MetadataSource, query: string) => { const currentApi = bridge ?? api(); const generation = ++candidateGeneration; const targetItem = state.item; const targetPath = targetItem?.path; state = { ...state, searching: true, searchCompleted: false, error: undefined }; emit(); const isCurrent = () => generation === candidateGeneration && state.item?.path === targetPath; try { const candidates = await currentApi?.searchMetadata(source, query, localMatchContext(targetItem)) ?? []; if (!isCurrent()) return []; state = { ...state, candidates, searching: false, searchCompleted: true }; emit(); return candidates; } catch { if (!isCurrent()) return []; state = { ...state, searching: false, searchCompleted: true, error: "Metadata search failed" }; emit(); return []; } }
   };
 }
 export const editorStore = createEditorStore();

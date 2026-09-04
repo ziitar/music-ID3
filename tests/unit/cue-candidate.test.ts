@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildCandidateCue } from "../../electron/services/cue-candidate";
+import { buildCandidateCue, cueFileTypeForAudioPath } from "../../electron/services/cue-candidate";
 import { serializeCue } from "../../electron/services/cue-service";
 import { framesToCueTime } from "../../shared/cue-time";
 
@@ -51,5 +51,41 @@ describe("candidate CUE generation", () => {
 
     expect(() => buildCandidateCue({ ...base, offsets: [150] })).toThrow(/one offset per track/i);
     expect(() => buildCandidateCue({ ...base, offsets: [150, 149] })).toThrow(/strictly increasing/i);
+  });
+
+  it("derives standards-compatible FILE types and rejects unsupported containers", () => {
+    expect(cueFileTypeForAudioPath("D:/Music/disc.MP3")).toBe("MP3");
+    expect(cueFileTypeForAudioPath("D:/Music/disc.wav")).toBe("WAVE");
+    expect(cueFileTypeForAudioPath("D:/Music/disc.flac")).toBe("WAVE");
+    expect(() => cueFileTypeForAudioPath("D:/Music/disc.ogg")).toThrow(/unsupported.*CUE FILE type/i);
+    expect(() => cueFileTypeForAudioPath("D:/Music/disc.bin")).toThrow(/unsupported.*CUE FILE type/i);
+  });
+
+  it("preserves provider trust provenance on a generated candidate draft", () => {
+    const cue = buildCandidateCue({
+      audioPath: "D:/Music/disc.mp3",
+      album: "Release",
+      performer: "Artist",
+      offsets: [150],
+      tracks: [{ title: "One" }],
+      provenance: {
+        source: "musicbrainz",
+        releaseId: "release-id",
+        discId: "disc-id",
+        evidence: ["Disc ID matched"],
+        confidence: "low",
+        inferred: true
+      }
+    });
+
+    expect(cue.files).toEqual([{ path: "disc.mp3", type: "MP3" }]);
+    expect(cue.provenance).toEqual({
+      source: "musicbrainz",
+      releaseId: "release-id",
+      discId: "disc-id",
+      evidence: ["Disc ID matched"],
+      confidence: "low",
+      inferred: true
+    });
   });
 });

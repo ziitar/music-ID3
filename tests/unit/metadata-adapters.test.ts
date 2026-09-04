@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createDecipheriv } from "node:crypto";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ipcChannels } from "../../shared/ipc";
 import type { MetadataCandidate, MetadataSource } from "../../shared/types";
 import { registerIpcHandlers } from "../../electron/ipc/register-ipc";
@@ -127,6 +127,42 @@ describe("metadata adapters", () => {
       ]
     });
     expect(queued.requests[0].url).toContain("inc=artist-credits%2Bmedia%2Bdiscids%2Brecordings");
+  });
+
+  it("models each MusicBrainz medium as a separate candidate with matching tracks offsets and Disc ID", async () => {
+    const release = {
+      id: "multi-release",
+      title: "Double Album",
+      date: "2026-09-04",
+      "artist-credit": [{ name: "Artist" }],
+      media: [
+        {
+          position: 1,
+          format: "CD",
+          "track-count": 2,
+          discs: [{ id: "disc-one", sectors: 20_000, offsets: [150, 10_000] }],
+          tracks: [{ position: 1, title: "Disc One A" }, { position: 2, title: "Disc One B" }]
+        },
+        {
+          position: 2,
+          format: "CD",
+          "track-count": 1,
+          discs: [{ id: "disc-two", sectors: 30_000, offsets: [300] }],
+          tracks: [{ position: 1, title: "Disc Two Only" }]
+        }
+      ]
+    };
+    const queued = queueTransport([response(JSON.stringify({ releases: [release] })), response(JSON.stringify(release))]);
+    const adapter = createMusicBrainzAdapter({ http: clientFor(queued.transport) });
+
+    const candidates = await adapter.search("Double Album");
+    const details = await adapter.getDetails("multi-release#medium=2");
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toMatchObject({ id: "multi-release#medium=1", releaseId: "multi-release", mediumPosition: 1, mediumCount: 2, discId: "disc-one", offsets: [150, 10_000], tracks: [{ title: "Disc One A" }, { title: "Disc One B" }] });
+    expect(candidates[1]).toMatchObject({ id: "multi-release#medium=2", releaseId: "multi-release", mediumPosition: 2, mediumCount: 2, discId: "disc-two", offsets: [300], tracks: [{ title: "Disc Two Only" }] });
+    expect(details).toMatchObject({ id: "multi-release#medium=2", discId: "disc-two", offsets: [300], tracks: [{ title: "Disc Two Only" }] });
+    expect(queued.requests[1].url).toContain("/release/multi-release?");
   });
 
   it("resolves a Cover Art Archive front-cover URL and returns encoded image bytes", async () => {
@@ -381,13 +417,12 @@ describe("metadata adapters", () => {
     const searchUrl = new URL(queued.requests[0].url);
     const detailUrl = new URL(queued.requests[1].url);
     expect(Object.fromEntries(searchUrl.searchParams)).toEqual(expected.search.params);
-    expect(queued.requests[0].headers).toMatchObject({ Host: expected.search.host, Referer: expected.search.referer });
+    expect(queued.requests[0]).toMatchObject({ referrer: expected.search.referer });
+    expect(queued.requests[0].headers).not.toHaveProperty("Host");
     expect(Object.fromEntries(Object.keys(expected.detail.params).map((key) => [key, detailUrl.searchParams.get(key)]))).toEqual(expected.detail.params);
-    expect(queued.requests[1].headers).toMatchObject({
-      Host: expected.detail.host,
-      Referer: expected.detail.referer,
-      "Content-Type": expected.detail.contentType
-    });
+    expect(queued.requests[1]).toMatchObject({ referrer: expected.detail.referer });
+    expect(queued.requests[1].headers).toMatchObject({ "Content-Type": expected.detail.contentType });
+    expect(queued.requests[1].headers).not.toHaveProperty("Host");
   });
 
   it("uses a finite auth-sensitive session cache for QQ searches", async () => {
@@ -873,5 +908,48 @@ describe("candidate scoring and IPC", () => {
     await expect(handlers.get(ipcChannels.clearOnlineCache)?.({})).resolves.toBeUndefined();
     expect(clearCount).toBe(1);
     expect(JSON.stringify(await handlers.get(ipcChannels.testProviderCookie)?.({}, "netease"))).not.toContain("Cookie");
+  });
+
+  it("ranks metadata search results from local structural evidence instead of adapter order", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const weak: MetadataCandidate = { id: "weak", source: "musicbrainz", title: "Album", artist: "Artist", trackCount: 1, confidence: "low" };
+    const strong: MetadataCandidate = { id: "strong", source: "musicbrainz", title: "Album", artist: "Artist", trackCount: 8, discId: "disc-id", confidence: "low" };
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      metadataAdapters: {
+        musicbrainz: { search: async () => [weak, strong], getDetails: async () => strong, getCover: async () => undefined }
+      }
+    });
+
+    const ranked = await handlers.get(ipcChannels.searchMetadata)?.({}, "musicbrainz", "Album", { title: "Album", artist: "Artist", trackCount: 8, discId: "disc-id" }) as MetadataCandidate[];
+
+    expect(ranked.map((candidate) => candidate.id)).toEqual(["strong", "weak"]);
+    expect(ranked[0]).toMatchObject({ confidence: "medium", evidence: expect.arrayContaining(["Track count matched", "Disc ID matched"]) });
+  });
+
+  it("uses CTDB validation for detailed MusicBrainz candidates and keeps validator failures nonblocking", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const details: MetadataCandidate = { id: "release", source: "musicbrainz", title: "Album", toc: "0:100:200", confidence: "low", evidence: ["MusicBrainz Disc ID available"] };
+    const validate = vi.fn(async () => ({ status: "match" as const, confidence: 12, evidence: ["CTDB verified the pressing"] }));
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      metadataAdapters: {
+        musicbrainz: { search: async () => [], getDetails: async () => details, getCover: async () => undefined },
+        ctdb: { search: async () => [], getDetails: async () => ({ id: "ctdb", source: "ctdb", title: "CTDB", confidence: "low" }), getCover: async () => undefined, validate } as MetadataAdapter
+      }
+    });
+
+    const validated = await handlers.get(ipcChannels.getMetadataCandidate)?.({}, "musicbrainz", "release", { title: "Album", toc: "0:100:200" });
+    expect(validate).toHaveBeenCalledWith("0:100:200");
+    expect(validated).toMatchObject({ ctdb: { status: "match", confidence: 12 }, evidence: expect.arrayContaining(["CTDB verified the pressing"]) });
+
+    validate.mockRejectedValueOnce(new Error("private CTDB failure"));
+    const fallback = await handlers.get(ipcChannels.getMetadataCandidate)?.({}, "musicbrainz", "release", { title: "Album" });
+    expect(fallback).toMatchObject({ id: "release", warnings: expect.arrayContaining(["CTDB validation unavailable"]) });
+    expect(JSON.stringify(fallback)).not.toContain("private CTDB failure");
   });
 });

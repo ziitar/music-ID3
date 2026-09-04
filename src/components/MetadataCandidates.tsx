@@ -6,6 +6,17 @@ import type { MetadataCandidate, MetadataSource } from "../../shared/types";
 const candidateFields = ["title", "artist", "album", "date", "cover"] as const;
 type PendingCandidate = { candidate: MetadataCandidate; confirmation: AudioWriteConfirmation; libraryGeneration: number };
 
+function defaultQuery(state: ReturnType<typeof editorStore.getState>): string {
+  const item = state.item;
+  if (!item) return "";
+  if (item.kind === "cue") return [item.parsed.performer, item.parsed.title].filter(Boolean).join(" ");
+  const common = item.metadata.common;
+  const albumFlow = item.wholeTrackStatus === "suspected";
+  return albumFlow
+    ? [common.albumArtist ?? common.artist, common.album ?? common.title].filter(Boolean).join(" ")
+    : [common.artist ?? common.albumArtist, common.title ?? common.album].filter(Boolean).join(" ");
+}
+
 export function MetadataCandidates() {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<MetadataSource>("musicbrainz");
@@ -23,7 +34,7 @@ export function MetadataCandidates() {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  useEffect(() => { setSource("musicbrainz"); setDetailsLoaded([]); setPending(undefined); }, [state.generation, cueFlow]);
+  useEffect(() => { setSource("musicbrainz"); setQuery(defaultQuery(editorStore.getState())); setSelected(["title", "artist", "album"]); setDetailsLoaded([]); setPending(undefined); }, [state.generation, cueFlow]);
   const loadDetails = async (candidate: MetadataCandidate) => {
     const result = await editorStore.loadCandidateDetails(candidate);
     if (result && mounted.current) setDetailsLoaded((current) => [...current, result]);

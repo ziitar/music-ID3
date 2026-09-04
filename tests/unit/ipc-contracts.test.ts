@@ -7,6 +7,15 @@ import { ipcChannels, isIpcChannel } from "../../shared/ipc";
 import type { CueDocument } from "../../shared/types";
 
 const temporaryDirectories: string[] = [];
+type Handler = (event: unknown, ...args: unknown[]) => unknown;
+
+function rendererEvent(id = 1, send?: (channel: string, payload: unknown) => void) {
+  return { sender: { id, send, once: () => undefined } };
+}
+
+async function approveRoot(handlers: Map<string, Handler>, event: ReturnType<typeof rendererEvent>): Promise<void> {
+  await handlers.get(ipcChannels.selectDirectory)?.(event);
+}
 
 async function createTempDir(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "music-id3-ipc-"));
@@ -24,6 +33,7 @@ describe("IPC contracts", () => {
       selectDirectory: "music-id3:select-directory",
       scanDirectory: "music-id3:scan-directory",
       cancelScan: "music-id3:cancel-scan",
+      setWholeTrackOverride: "music-id3:set-whole-track-override",
       readAudio: "music-id3:read-audio",
       writeAudio: "music-id3:write-audio",
       readCue: "music-id3:read-cue",
@@ -65,6 +75,7 @@ describe("IPC contracts", () => {
       ipcChannels.selectDirectory,
       ipcChannels.scanDirectory,
       ipcChannels.cancelScan,
+      ipcChannels.setWholeTrackOverride,
       ipcChannels.readAudio,
       ipcChannels.writeAudio,
       ipcChannels.readCue,
@@ -92,12 +103,18 @@ describe("IPC contracts", () => {
   });
 
   it("previews raw CUE and builds a MusicBrainz candidate document", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
-    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" } });
-    const preview = await handlers.get(ipcChannels.previewCue)?.({}, "D:/Music/disc.cue", 'TITLE "Edited"\nFILE "disc.flac" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00');
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
+    const audioPath = path.join(root, "disc.flac");
+    const cuePath = path.join(root, "disc.cue");
+    await writeFile(audioPath, "audio fixture");
+    const event = rendererEvent();
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: false, filePaths: [root] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" } });
+    await approveRoot(handlers, event);
+    const preview = await handlers.get(ipcChannels.previewCue)?.(event, cuePath, 'TITLE "Edited"\nFILE "disc.flac" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00');
     expect(preview).toMatchObject({ parsed: { title: "Edited" } });
     expect((preview as { parseError?: string }).parseError).toBeUndefined();
-    const built = await handlers.get(ipcChannels.buildCandidateCue)?.({}, { audioPath: "D:/Music/disc.flac", candidate: { id: "mb", source: "musicbrainz", title: "Release", artist: "Artist", offsets: [150, 7650], tracks: [{ number: 1, title: "One" }, { number: 2, title: "Two" }], confidence: "high" } });
+    const built = await handlers.get(ipcChannels.buildCandidateCue)?.(event, { audioPath, candidate: { id: "mb", source: "musicbrainz", title: "Release", artist: "Artist", offsets: [150, 7650], tracks: [{ number: 1, title: "One" }, { number: 2, title: "Two" }], confidence: "high" } });
     expect(built).toMatchObject({ title: "Release", performer: "Artist", files: [{ path: "disc.flac" }], tracks: [{ title: "One" }, { title: "Two" }] });
   });
 
@@ -140,7 +157,7 @@ describe("IPC contracts", () => {
   });
 
   it("starts a scan and publishes typed progress only to the invoking renderer", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const handlers = new Map<string, Handler>();
     const root = await createTempDir();
     await writeFile(path.join(root, "notes.txt"), "not audio");
     let complete!: () => void;
@@ -150,21 +167,17 @@ describe("IPC contracts", () => {
     const progress: unknown[] = [];
     registerIpcHandlers({
       ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
-      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      showOpenDialog: async () => ({ canceled: false, filePaths: [root] }),
       cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }
     });
 
-    const started = await handlers.get(ipcChannels.scanDirectory)?.({
-      sender: {
-        send(channel: string, payload: unknown) {
-          expect(channel).toBe(ipcChannels.scanProgress);
-          progress.push(payload);
-          if ((payload as { phase?: string }).phase === "complete") {
-            complete();
-          }
-        }
-      }
-    }, root, "renderer-request");
+    const event = rendererEvent(1, (channel, payload) => {
+      expect(channel).toBe(ipcChannels.scanProgress);
+      progress.push(payload);
+      if ((payload as { phase?: string }).phase === "complete") complete();
+    });
+    await approveRoot(handlers, event);
+    const started = await handlers.get(ipcChannels.scanDirectory)?.(event, root, "renderer-request");
     await completed;
 
     expect(started).toEqual({ ok: true, requestId: "renderer-request", scanId: expect.any(String) });
@@ -174,27 +187,33 @@ describe("IPC contracts", () => {
   });
 
   it("aborts the matching main-process scan without publishing completion", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
     let signal: AbortSignal | undefined;
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const progress: unknown[] = [];
-    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
-    const started = await handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: (_channel: string, payload: unknown) => progress.push(payload) } }, "D:/Music", "renderer-request") as { scanId: string };
-    await handlers.get(ipcChannels.cancelScan)?.({}, "renderer-request");
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: false, filePaths: [root] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
+    const event = rendererEvent(1, (_channel, payload) => progress.push(payload));
+    await approveRoot(handlers, event);
+    const started = await handlers.get(ipcChannels.scanDirectory)?.(event, root, "renderer-request") as { scanId: string };
+    await handlers.get(ipcChannels.cancelScan)?.(event, "renderer-request");
     expect(signal?.aborted).toBe(true); release(); await Promise.resolve(); await Promise.resolve();
     expect(progress).toEqual([]);
   });
 
   it("registers scan ownership under the renderer request ID before scanning begins", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
     let signal: AbortSignal | undefined;
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
-    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: true, filePaths: [] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
+    registerIpcHandlers({ ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } }, showOpenDialog: async () => ({ canceled: false, filePaths: [root] }), cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }, scanLibrary: async (_root, _onItem, currentSignal) => { signal = currentSignal; await blocked; return { items: [], errors: [] }; } });
 
-    const started = handlers.get(ipcChannels.scanDirectory)?.({ sender: { send: () => undefined } }, "D:/Music", "renderer-request") as { requestId: string };
-    await handlers.get(ipcChannels.cancelScan)?.({}, "renderer-request");
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    const started = await handlers.get(ipcChannels.scanDirectory)?.(event, root, "renderer-request") as { requestId: string };
+    await handlers.get(ipcChannels.cancelScan)?.(event, "renderer-request");
 
     expect(started).toMatchObject({ ok: true, requestId: "renderer-request" });
     expect(signal?.aborted).toBe(true);
@@ -202,7 +221,7 @@ describe("IPC contracts", () => {
   });
 
   it("reads and saves CUE files through the concrete allow-listed handlers", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const handlers = new Map<string, Handler>();
     const root = await createTempDir();
     const cuePath = path.join(root, "album.cue");
     const original = 'TITLE "Before"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
@@ -216,16 +235,19 @@ describe("IPC contracts", () => {
     await writeFile(cuePath, original);
     registerIpcHandlers({
       ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
-      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      showOpenDialog: async () => ({ canceled: false, filePaths: [root] }),
       cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }
     });
 
-    const read = await handlers.get(ipcChannels.readCue)?.({}, cuePath);
-    const saved = await handlers.get(ipcChannels.saveCue)?.({}, {
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    const read = await handlers.get(ipcChannels.readCue)?.(event, cuePath);
+    const saved = await handlers.get(ipcChannels.saveCue)?.(event, {
       path: cuePath,
       document: replacement,
       rawText: "",
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "ipc-save"
     });
 
     expect(read).toMatchObject({ path: cuePath, parsed: { title: "Before" } });
@@ -233,7 +255,7 @@ describe("IPC contracts", () => {
   });
 
   it("rejects forged CUE source text received from the renderer", async () => {
-    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const handlers = new Map<string, Handler>();
     const root = await createTempDir();
     const cuePath = path.join(root, "forged.cue");
     const document: CueDocument = {
@@ -253,15 +275,18 @@ describe("IPC contracts", () => {
     };
     registerIpcHandlers({
       ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
-      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      showOpenDialog: async () => ({ canceled: false, filePaths: [root] }),
       cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }
     });
 
-    const result = await handlers.get(ipcChannels.saveCue)?.({}, {
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    const result = await handlers.get(ipcChannels.saveCue)?.(event, {
       path: cuePath,
       document,
       rawText: document.sourceText,
-      encoding: "utf8"
+      encoding: "utf8",
+      confirmationToken: "forged-ipc-save"
     });
 
     expect(result).toEqual({ ok: false, error: expect.any(String) });

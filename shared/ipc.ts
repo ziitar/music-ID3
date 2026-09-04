@@ -8,6 +8,7 @@ import type {
   CueDocumentState,
   MetadataCandidate,
   MetadataPatch,
+  MetadataSearchContext,
   MetadataSource,
   SaveCueInput,
   SaveCueResult,
@@ -20,6 +21,7 @@ export const ipcChannels = {
   selectDirectory: "music-id3:select-directory",
   scanDirectory: "music-id3:scan-directory",
   cancelScan: "music-id3:cancel-scan",
+  setWholeTrackOverride: "music-id3:set-whole-track-override",
   readAudio: "music-id3:read-audio",
   writeAudio: "music-id3:write-audio",
   readCue: "music-id3:read-cue",
@@ -47,14 +49,15 @@ export type MusicId3Api = {
   selectDirectory(): Promise<string | undefined>;
   scanDirectory(path: string, requestId: string): Promise<ScanStarted>;
   cancelScan(requestId: string): Promise<void>;
+  setWholeTrackOverride(path: string, enabled: boolean): Promise<void>;
   readAudio(path: string): Promise<AudioMetadata>;
   writeAudio(path: string, patch: MetadataPatch): Promise<WriteResult>;
-  readCue(path: string): Promise<CueDocumentState>;
+  readCue(path: string, sourceEncoding?: CueDocumentState["encoding"]): Promise<CueDocumentState>;
   saveCue(input: SaveCueInput): Promise<SaveCueResult>;
   previewCue(path: string, rawText: string): Promise<CueDocumentState>;
   buildCandidateCue(input: BuildCandidateCueInput): Promise<CueDocument>;
-  searchMetadata(source: MetadataSource, query: string): Promise<MetadataCandidate[]>;
-  getMetadataCandidate(source: MetadataSource, id: string): Promise<MetadataCandidate>;
+  searchMetadata(source: MetadataSource, query: string, context?: MetadataSearchContext): Promise<MetadataCandidate[]>;
+  getMetadataCandidate(source: MetadataSource, id: string, context?: MetadataSearchContext): Promise<MetadataCandidate>;
   setProviderCookie(source: CookieSource, value: string): Promise<void>;
   testProviderCookie(source: CookieSource): Promise<CookieTestResult>;
   getProviderCookieStatus(source: CookieSource): Promise<CookieStatus>;

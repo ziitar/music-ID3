@@ -19,7 +19,7 @@ test("catches progressive scan callbacks being replaced by final-summary replay"
 test("catches a supported audio format or mixed-case extension disappearing from scan results", async ({ page, fixtureRoot }) => {
   await scan(page);
 
-  await expect(page.getByTestId("library-count")).toHaveText("12 items");
+  await expect(page.getByTestId("library-count")).toHaveText("13 items");
   await expect(page.getByTestId("directory-root")).toHaveText(fixtureRoot);
 
   const expectedFormats = [
@@ -51,7 +51,7 @@ test("catches a supported audio format or mixed-case extension disappearing from
 
 test("catches metadata details becoming editable before a suspected whole-track override", async ({ page }) => {
   await scan(page);
-  await expect(page.getByTestId("library-count")).toHaveText("12 items");
+  await expect(page.getByTestId("library-count")).toHaveText("13 items");
 
   await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
   await expect(page.getByTestId("details-file-name")).toHaveText("editable.Mp3");

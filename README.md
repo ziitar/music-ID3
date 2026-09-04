@@ -30,7 +30,7 @@ Local audio files and CUE files are not uploaded. Provider use does transmit the
 
 ## Development
 
-Requirements are Node.js 22 or newer and Windows for packaging and desktop E2E verification.
+Requirements are Node.js 22.12 or newer and Windows for packaging and desktop E2E verification.
 
 ```powershell
 npm ci

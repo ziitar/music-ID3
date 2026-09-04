@@ -61,6 +61,15 @@ export type CuePreservedLine = {
   position: number;
 };
 
+export type CueProvenance = {
+  source: "musicbrainz";
+  releaseId: string;
+  discId?: string;
+  evidence: string[];
+  confidence: "high" | "medium" | "low";
+  inferred: boolean;
+};
+
 export type CueDocument = {
   title?: string;
   performer?: string;
@@ -72,6 +81,7 @@ export type CueDocument = {
   preservedLines?: CuePreservedLine[];
   sourceText?: string;
   sourceFingerprint?: string;
+  provenance?: CueProvenance;
 };
 
 export type CueDocumentState = {
@@ -90,6 +100,7 @@ export type SaveCueInput = {
   document: CueDocument;
   rawText: string;
   encoding: CueEncoding;
+  confirmationToken: string;
 };
 
 export type LibraryItem =
@@ -139,6 +150,19 @@ export type MetadataCandidate = {
   confidence: "high" | "medium" | "low";
   evidence?: string[];
   warnings?: string[];
+  releaseId?: string;
+  mediumPosition?: number;
+  mediumCount?: number;
+};
+
+export type MetadataSearchContext = {
+  title?: string;
+  artist?: string;
+  trackCount?: number;
+  durationMs?: number;
+  trackDurationsMs?: number[];
+  discId?: string;
+  toc?: string;
 };
 
 export type ScanStarted = {

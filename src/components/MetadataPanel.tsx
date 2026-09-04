@@ -47,10 +47,16 @@ export function MetadataPanel() {
   }, [state.generation]);
 
   if (!item) return <aside className="pane details-pane" aria-label="Details"><h2>Details</h2><p className="empty-state">Select a file to inspect.</p></aside>;
-  const candidateCueItem = cueDraft ? { kind: "cue" as const, path: item.kind === "cue" ? item.path : `${item.path}.cue`, encoding: item.kind === "cue" ? item.encoding : "utf8" as const, rawText: "", parsed: cueDraft, referencedFiles: item.kind === "cue" ? item.referencedFiles : [item.path], missingReferencedFiles: [] } : undefined;
+  const candidateCueItem = cueDraft ? { kind: "cue" as const, path: item.kind === "cue" ? item.path : `${item.path}.cue`, encoding: item.kind === "cue" ? item.encoding : "utf8-bom" as const, rawText: "", parsed: cueDraft, referencedFiles: item.kind === "cue" ? item.referencedFiles : [item.path], missingReferencedFiles: [] } : undefined;
   if (item.kind === "cue") return <aside className="pane details-pane" aria-label="Details"><CueEditor key={`${item.path}:${candidateCueItem ? "candidate" : "local"}`} item={candidateCueItem ?? item} source={candidateCueItem ? state.candidateSource : undefined} /><MetadataCandidates /></aside>;
 
-  const fields = ["title", "artist", "album", "albumArtist", "date", "genre", "comment"];
+  const fields = [
+    { name: "title", numeric: false }, { name: "artist", numeric: false }, { name: "album", numeric: false },
+    { name: "albumArtist", numeric: false }, { name: "trackNumber", numeric: true }, { name: "trackTotal", numeric: true },
+    { name: "discNumber", numeric: true }, { name: "discTotal", numeric: true }, { name: "date", numeric: false },
+    { name: "genre", numeric: false }, { name: "composer", numeric: false }, { name: "comment", numeric: false },
+    { name: "lyrics", numeric: false }, { name: "copyright", numeric: false }
+  ] as const;
   const suspected = item.wholeTrackStatus === "suspected";
   const unsupported = item.extension === ".wv";
   const currentCover = draft.cover as CoverArt | undefined;
@@ -107,9 +113,9 @@ export function MetadataPanel() {
     {candidateCueItem && <CueEditor key="candidate-cue" item={candidateCueItem} source={state.candidateSource} />}
     <div className="mode-tabs"><button aria-pressed={mode === "common"} onClick={() => setMode("common")}>Common tags</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>Raw tags</button></div>
     {mode === "raw" ? <pre className="raw-tags" aria-label="raw tags read only" data-testid="raw-tags">{JSON.stringify(item.metadata.raw, null, 2)}</pre> : <>
-      <div className="cover-controls">{currentCover ? <img className="cover-preview" alt="cover preview" src={`data:${currentCover.mimeType};base64,${currentCover.data}`} /> : <div className="cover-empty">No cover</div>}<span>{currentCover?.mimeType ?? "No cover selected"}</span><button onClick={openCoverConfirmation}>Remove cover</button><label className="file-button">Replace cover<input aria-label="cover file" type="file" accept="image/*" hidden onChange={(event) => readCover(event.target.files?.[0])} /></label></div>
-      <div className="tag-editor">{fields.map((field) => <label key={field}><input type="checkbox" aria-label={field} checked={selectedFields.includes(field)} disabled={unsupported} onChange={(event) => editorStore.setFieldSelected(field, event.target.checked)} /><span>{field}{unsupported ? " (unsupported)" : ""}</span><input aria-label={`${field} value`} value={String(draft[field] ?? "")} disabled={suspected || unsupported} onChange={(event) => editorStore.setField(field, event.target.value)} /></label>)}</div>
-      <button disabled={selectedFields.length === 0} onClick={() => editorStore.previewDiff()}>Preview diff</button>
+      <div className="cover-controls">{currentCover ? <img className="cover-preview" alt="cover preview" src={`data:${currentCover.mimeType};base64,${currentCover.data}`} /> : <div className="cover-empty">No cover</div>}<span>{currentCover?.mimeType ?? "No cover selected"}</span><button disabled={suspected || unsupported} onClick={openCoverConfirmation}>Remove cover</button><label className="file-button">Replace cover<input aria-label="cover file" type="file" accept="image/*" hidden disabled={suspected || unsupported} onChange={(event) => readCover(event.target.files?.[0])} /></label></div>
+      <div className="tag-editor">{fields.map((field) => <label key={field.name}><input type="checkbox" aria-label={field.name} checked={selectedFields.includes(field.name)} disabled={suspected || unsupported} onChange={(event) => editorStore.setFieldSelected(field.name, event.target.checked)} /><span>{field.name}{unsupported ? " (unsupported)" : ""}</span><input aria-label={`${field.name} value`} type={field.numeric ? "number" : "text"} {...(field.numeric ? { min: 0, step: 1 } : {})} value={String(draft[field.name] ?? "")} disabled={suspected || unsupported} onChange={(event) => editorStore.setField(field.name, field.numeric ? (event.target.value === "" ? undefined : Number(event.target.value)) : event.target.value)} /></label>)}</div>
+      <button disabled={suspected || unsupported || selectedFields.length === 0} onClick={() => editorStore.previewDiff()}>Preview diff</button>
       {diff.length > 0 && <div className="diff-preview" data-testid="metadata-diff">{diff.map((entry) => <div key={entry.field}><strong>{entry.field}</strong>: <del>{valueText(entry.oldValue)}</del> <ins>{valueText(entry.newValue)}</ins></div>)}<button onClick={openWriteConfirmation}>Write selected fields</button></div>}
     </>}
     {coverConfirmationCurrent && coverConfirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>Clear cover art?</p><button onClick={() => { if (!isCoverConfirmationCurrent(coverConfirm)) { setCoverConfirm(undefined); return; } abortCoverRead(); selectCover(undefined); setCoverConfirm(undefined); }}>Confirm clear</button><button onClick={() => setCoverConfirm(undefined)}>Cancel</button></div></div>}

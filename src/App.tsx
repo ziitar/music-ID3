@@ -10,7 +10,7 @@ export function App() {
   useEffect(() => {
     const onRoot = (event: Event) => { editorStore.setItem(undefined); void libraryStore.selectRoot((event as CustomEvent<string>).detail); };
     const onItem = (event: Event) => { const path = (event as CustomEvent<string>).detail; libraryStore.selectItem(path); const item = libraryStore.getState().items.find((entry) => entry.path === path); editorStore.setItem(item); };
-    const onOverride = (event: Event) => { const path = (event as CustomEvent<string>).detail; libraryStore.setWholeTrackOverride(path, true); const item = libraryStore.getState().items.find((entry) => entry.path === path); editorStore.setItem(item); };
+    const onOverride = (event: Event) => { const path = (event as CustomEvent<string>).detail; void libraryStore.setWholeTrackOverride(path, true).then((accepted) => { if (!accepted || libraryStore.getState().selectedPath !== path) return; const item = libraryStore.getState().items.find((entry) => entry.path === path); if (item) editorStore.setItem(item); }); };
     const onCancel = () => libraryStore.cancelScan();
     window.addEventListener("music-id3:select-root", onRoot); window.addEventListener("music-id3:select-item", onItem); window.addEventListener("music-id3:override", onOverride); window.addEventListener("music-id3:cancel-scan", onCancel);
     return () => { window.removeEventListener("music-id3:select-root", onRoot); window.removeEventListener("music-id3:select-item", onItem); window.removeEventListener("music-id3:override", onOverride); window.removeEventListener("music-id3:cancel-scan", onCancel); };

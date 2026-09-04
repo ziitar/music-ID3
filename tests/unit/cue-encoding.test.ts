@@ -74,4 +74,21 @@ describe("CUE encoding", () => {
 
     expect(decoded.candidateEncodings).toEqual(expect.arrayContaining(["gbk", "big5", "shift-jis"]));
   });
+
+  it("decodes original bytes with the explicitly selected uncertain source encoding", () => {
+    const bytes = Buffer.from([0x54, 0x49, 0x54, 0x4c, 0x45, 0x20, 0x22, 0x82, 0xa0, 0x22]);
+
+    const decoded = decodeCueBytes(bytes, "shift-jis");
+
+    expect(decoded).toEqual({ encoding: "shift-jis", text: 'TITLE "あ"' });
+  });
+
+  it("rejects a legacy encoding that cannot round-trip the requested CUE text", () => {
+    expect(() => encodeCueText('TITLE "Album 🎵"', "gbk")).toThrow(/cannot represent.*UTF-8 BOM/i);
+  });
+
+  it("round-trips representable legacy text without changing it", () => {
+    const text = 'TITLE "中文专辑"';
+    expect(decodeCueBytes(encodeCueText(text, "gb18030"), "gb18030").text).toBe(text);
+  });
 });

@@ -4,7 +4,7 @@ import { expect, test } from "./electron-fixture";
 
 async function scan(page: import("playwright/test").Page) {
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("library-count")).toHaveText("12 items");
+  await expect(page.getByTestId("library-count")).toHaveText("13 items");
 }
 
 async function readText(filePath: string): Promise<string | undefined> {
@@ -16,6 +16,15 @@ test("catches CUE reference diagnostics disappearing at the renderer boundary", 
   await page.getByTestId("library-row").filter({ hasText: "missing-file.cue" }).click();
   await expect(page.getByText("Missing references:", { exact: false })).toContainText("Ghost.FLAC");
   await expect(page.getByLabel("cue album title")).toHaveValue("Missing Album");
+});
+
+test("reads a legacy-encoded CUE from an actual Chinese disk path", async ({ page, fixtureRoot }) => {
+  await scan(page);
+  expect(fixtureRoot).toContain("音乐 测试库");
+  await page.getByTestId("library-row").filter({ hasText: "旧编码.cue" }).click();
+  await page.getByRole("button", { name: "Decode as gb18030" }).click();
+  await expect(page.getByLabel("cue album title")).toHaveValue("中华人民共和国音乐唱片测试专辑你好世界");
+  await expect(page.getByLabel("cue album performer")).toHaveValue("中国音乐艺术家");
 });
 
 test("catches a CUE overwrite that does not preserve the original backup", async ({ page, fixtureRoot }) => {

@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { CueDocument } from "../../shared/types";
+import type { CueDocument, CueProvenance } from "../../shared/types";
 import { framesToCueTime } from "../../shared/cue-time";
 
 export type CandidateCueInput = {
@@ -10,7 +10,15 @@ export type CandidateCueInput = {
   offsets: number[];
   tracks: Array<{ title: string; performer?: string }>;
   fileType?: string;
+  provenance?: CueProvenance;
 };
+
+export function cueFileTypeForAudioPath(audioPath: string): "MP3" | "WAVE" {
+  const extension = path.extname(audioPath).toLocaleLowerCase("en-US");
+  if (extension === ".mp3") return "MP3";
+  if ([".wav", ".flac", ".ape", ".wv"].includes(extension)) return "WAVE";
+  throw new Error(`Unsupported audio container ${extension || "(none)"} for a standard CUE FILE type`);
+}
 
 export function buildCandidateCue(input: CandidateCueInput): CueDocument {
   if (input.tracks.length === 0 || input.offsets.length !== input.tracks.length) {
@@ -31,7 +39,7 @@ export function buildCandidateCue(input: CandidateCueInput): CueDocument {
     title: input.album,
     performer: input.performer,
     remarks: input.date ? [`DATE ${input.date}`] : [],
-    files: [{ path: path.basename(input.audioPath), type: input.fileType ?? "WAVE" }],
+    files: [{ path: path.basename(input.audioPath), type: input.fileType ?? cueFileTypeForAudioPath(input.audioPath) }],
     tracks: input.tracks.map((track, index) => ({
       number: index + 1,
       type: "AUDIO",
@@ -40,6 +48,7 @@ export function buildCandidateCue(input: CandidateCueInput): CueDocument {
       performer: track.performer,
       indexes: [{ number: 1, time: framesToCueTime(input.offsets[index] - firstOffset) }]
     })),
-    unknownLines: []
+    unknownLines: [],
+    ...(input.provenance ? { provenance: { ...input.provenance, evidence: [...input.provenance.evidence] } } : {})
   };
 }

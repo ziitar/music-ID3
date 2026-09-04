@@ -41,6 +41,9 @@ function e2eScanLibrary(delayMs: number): typeof scanDirectory {
   };
 }
 
+const e2eUserDataPath = e2eArgument("music-id3-e2e-user-data");
+if (e2eUserDataPath) app.setPath("userData", path.resolve(e2eUserDataPath));
+
 function createWindow() {
   const window = new BrowserWindow({
     width: 1200,

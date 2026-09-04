@@ -48,7 +48,13 @@ function iconvEncoding(encoding: CueEncoding): string {
   return encoding === "utf8-bom" ? "utf8" : encoding === "shift-jis" ? "shift_jis" : encoding;
 }
 
-export function decodeCueBytes(bytes: Buffer): DecodedCue {
+export function decodeCueBytes(bytes: Buffer, selectedEncoding?: CueEncoding): DecodedCue {
+  if (selectedEncoding) {
+    const content = selectedEncoding === "utf8-bom" && bytes.subarray(0, UTF8_BOM.length).equals(UTF8_BOM)
+      ? bytes.subarray(UTF8_BOM.length)
+      : bytes;
+    return { encoding: selectedEncoding, text: iconv.decode(content, iconvEncoding(selectedEncoding)) };
+  }
   if (bytes.subarray(0, UTF8_BOM.length).equals(UTF8_BOM)) {
     return { encoding: "utf8-bom", text: iconv.decode(bytes.subarray(UTF8_BOM.length), "utf8") };
   }
@@ -90,5 +96,8 @@ export function decodeCueBytes(bytes: Buffer): DecodedCue {
 
 export function encodeCueText(text: string, encoding: CueEncoding): Buffer {
   const encoded = iconv.encode(text, iconvEncoding(encoding));
+  if (iconv.decode(encoded, iconvEncoding(encoding)) !== text) {
+    throw new Error(`The selected ${encoding} encoding cannot represent every character. Choose UTF-8 BOM or remove unsupported characters.`);
+  }
   return encoding === "utf8-bom" ? Buffer.concat([UTF8_BOM, encoded]) : encoded;
 }

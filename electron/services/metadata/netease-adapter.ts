@@ -161,9 +161,9 @@ export function createNeteaseAdapter(options: {
           headers: {
             Accept: "application/json",
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            Referer: musicDomain,
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
           },
+          referrer: musicDomain,
           prepareRequest: async () => {
             const cookie = await options.cookieStore.get("netease");
             const c = JSON.stringify([{ id: Number.isFinite(Number(id)) ? Number(id) : id }]);
@@ -187,7 +187,8 @@ export function createNeteaseAdapter(options: {
     async getCover(candidate) {
       if (!candidate.coverUrl) return undefined;
       const result = await options.http.getBytes("netease", safeCoverUrl(candidate.coverUrl), {
-        headers: { Accept: "image/*", Referer: "https://music.163.com/" },
+        headers: { Accept: "image/*" },
+        referrer: "https://music.163.com/",
         maxResponseBytes: coverMaxBytes,
         cacheTtlMs: sessionCacheTtlMs,
         cacheKey: `netease:cover:${candidate.coverUrl}`,
