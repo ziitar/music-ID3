@@ -26,6 +26,7 @@ const cookieFileName = "provider-cookies.json";
 
 export function createCookieStore({ safeStorage, userDataPath }: CookieStoreOptions): CookieStore {
   const storagePath = path.join(userDataPath, cookieFileName);
+  let mutationQueue: Promise<void> = Promise.resolve();
 
   async function readStoredCookies(): Promise<StoredCookies> {
     try {
@@ -51,15 +52,23 @@ export function createCookieStore({ safeStorage, userDataPath }: CookieStoreOpti
     }
   }
 
+  function queueMutation(mutation: () => Promise<void>): Promise<void> {
+    const result = mutationQueue.then(mutation, mutation);
+    mutationQueue = result.catch(() => undefined);
+    return result;
+  }
+
   return {
     async set(source, value) {
-      const cookies = await readStoredCookies();
-      if (value.length === 0) {
-        delete cookies[source];
-      } else {
-        cookies[source] = safeStorage.encryptString(value).toString("base64");
-      }
-      await writeStoredCookies(cookies);
+      await queueMutation(async () => {
+        const cookies = await readStoredCookies();
+        if (value.length === 0) {
+          delete cookies[source];
+        } else {
+          cookies[source] = safeStorage.encryptString(value).toString("base64");
+        }
+        await writeStoredCookies(cookies);
+      });
     },
 
     async get(source) {

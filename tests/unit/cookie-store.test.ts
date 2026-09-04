@@ -52,4 +52,27 @@ describe("cookie store", () => {
     expect(await store.redacted("qq")).toBe("configured");
     expect(await store.redacted("qq")).not.toContain("qq-secret");
   });
+
+  it("preserves concurrent updates for different providers", async () => {
+    const store = createCookieStore({ safeStorage: fakeSafeStorage(), userDataPath: await createTempDir() });
+
+    await Promise.all([
+      store.set("netease", "MUSIC_U=netease-secret"),
+      store.set("qq", "uin=o123; skey=qq-secret")
+    ]);
+
+    expect(await store.get("netease")).toBe("MUSIC_U=netease-secret");
+    expect(await store.get("qq")).toBe("uin=o123; skey=qq-secret");
+  });
+
+  it("clears an empty provider Cookie and reports it as unconfigured", async () => {
+    const store = createCookieStore({ safeStorage: fakeSafeStorage(), userDataPath: await createTempDir() });
+    await store.set("qq", "uin=o123; skey=qq-secret");
+
+    await store.set("qq", "");
+
+    expect(await store.get("qq")).toBeUndefined();
+    expect(await store.redacted("qq")).toBe("unconfigured");
+    expect(await readFile(store.filePath(), "utf8")).not.toContain("qq-secret");
+  });
 });
