@@ -1,0 +1,19 @@
+{
+  "id": "f34dcbf5-2f9d-4f7f-8c8d-3d78deedc84b",
+  "title": "Kind of Blue",
+  "date": "1959-08-17",
+  "country": "US",
+  "artist-credit": [{ "name": "Miles Davis", "artist": { "id": "561d854a-6a28-4aa7-8c99-323e6ce46c2a", "name": "Miles Davis" } }],
+  "media": [
+    {
+      "position": 1,
+      "format": "CD",
+      "track-count": 2,
+      "discs": [{ "id": "abc123-disc-id", "sectors": 27000, "offsets": [150, 13500] }],
+      "tracks": [
+        { "position": 1, "number": "1", "title": "So What", "length": 545000, "recording": { "id": "rec-1", "title": "So What" } },
+        { "position": 2, "number": "2", "title": "Freddie Freeloader", "length": 589000, "recording": { "id": "rec-2", "title": "Freddie Freeloader", "artist-credit": [{ "name": "Miles Davis" }] } }
+      ]
+    }
+  ]
+}

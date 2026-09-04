@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { OpenDialogOptions } from "electron";
 import { ipcChannels } from "../../shared/ipc";
 import type { CookieSource, CueEncoding, MetadataPatch, SaveCueInput, ScanProgress } from "../../shared/types";
+import type { MetadataSource } from "../../shared/types";
 import type { CookieStore } from "../services/cookie-store";
+import type { MetadataAdapter } from "../services/metadata/adapter";
 import { scanDirectory } from "../services/library-scanner";
 import { readAudioMetadata, writeAudioMetadata } from "../services/tag-service";
 import { readCue, saveCue } from "../services/cue-service";
@@ -15,6 +17,7 @@ type RegisterIpcHandlersOptions = {
   ipcMain: IpcMainLike;
   showOpenDialog(options: OpenDialogOptions): Promise<{ canceled: boolean; filePaths: string[] }>;
   cookieStore: Pick<CookieStore, "set" | "redacted">;
+  metadataAdapters?: Partial<Record<MetadataSource, MetadataAdapter>>;
 };
 
 function asString(value: unknown, name: string): string {
@@ -29,6 +32,13 @@ function asCookieSource(value: unknown): CookieSource {
     return value;
   }
   throw new TypeError("Cookie source must be netease or qq");
+}
+
+function asMetadataSource(value: unknown): MetadataSource {
+  if (value === "musicbrainz" || value === "ctdb" || value === "netease" || value === "qq") {
+    return value;
+  }
+  throw new TypeError("Metadata source must be musicbrainz, ctdb, netease, or qq");
 }
 
 function asMetadataPatch(value: unknown): MetadataPatch {
@@ -70,11 +80,7 @@ function publishScanProgress(event: unknown, progress: ScanProgress): void {
   sender?.send(ipcChannels.scanProgress, progress);
 }
 
-function unavailable(operation: string): never {
-  throw new Error(`${operation} is not available yet`);
-}
-
-export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore }: RegisterIpcHandlersOptions): void {
+export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore, metadataAdapters = {} }: RegisterIpcHandlersOptions): void {
   ipcMain.handle(ipcChannels.selectDirectory, async () => {
     const result = await showOpenDialog({ properties: ["openDirectory"] });
     return result.canceled ? undefined : result.filePaths[0];
@@ -118,9 +124,10 @@ export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore }: Re
   ipcMain.handle(ipcChannels.saveCue, (_event, input) => saveCue(asSaveCueInput(input)));
 
   ipcMain.handle(ipcChannels.searchMetadata, (_event, source, query) => {
-    asString(source, "source");
-    asString(query, "query");
-    return unavailable("Metadata search");
+    const metadataSource = asMetadataSource(source);
+    const adapter = metadataAdapters[metadataSource];
+    if (!adapter) throw new Error(`Metadata source ${metadataSource} is not configured`);
+    return adapter.search(asString(query, "query"));
   });
 
   ipcMain.handle(ipcChannels.setProviderCookie, async (_event, source, value) => {
@@ -129,8 +136,17 @@ export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore }: Re
 
   ipcMain.handle(ipcChannels.testProviderCookie, async (_event, source) => {
     const cookieSource = asCookieSource(source);
-    return (await cookieStore.redacted(cookieSource)) === "configured"
-      ? { ok: false, error: "Provider connectivity checks are not available yet" }
-      : { ok: false, error: "No Cookie configured" };
+    if ((await cookieStore.redacted(cookieSource)) !== "configured") {
+      return { ok: false, error: "No Cookie configured" };
+    }
+    try {
+      const adapter = metadataAdapters[cookieSource];
+      if (!adapter) return { ok: false, error: "Provider is not configured" };
+      if (adapter.testConnection) await adapter.testConnection();
+      else await adapter.search("test");
+      return { ok: true, status: "configured" };
+    } catch {
+      return { ok: false, error: "Provider connectivity check failed" };
+    }
   });
 }

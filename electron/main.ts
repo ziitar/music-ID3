@@ -1,7 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, safeStorage } from "electron";
 import path from "node:path";
 import { registerIpcHandlers } from "./ipc/register-ipc";
 import { createCookieStore } from "./services/cookie-store";
+import { createCtdbAdapter } from "./services/metadata/ctdb-adapter";
+import { createElectronTransport, createHttpClient } from "./services/metadata/http-client";
+import { createMusicBrainzAdapter } from "./services/metadata/musicbrainz-adapter";
+import { createNeteaseAdapter } from "./services/metadata/netease-adapter";
+import { createQqMusicAdapter } from "./services/metadata/qqmusic-adapter";
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -22,10 +27,21 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const cookieStore = createCookieStore({ safeStorage, userDataPath: app.getPath("userData") });
+  const http = createHttpClient({ transport: createElectronTransport(net) });
   registerIpcHandlers({
     ipcMain,
     showOpenDialog: (options) => dialog.showOpenDialog(options),
-    cookieStore: createCookieStore({ safeStorage, userDataPath: app.getPath("userData") })
+    cookieStore,
+    metadataAdapters: {
+      musicbrainz: createMusicBrainzAdapter({
+        http,
+        userAgent: process.env.MUSIC_ID3_USER_AGENT ?? "MusicID3Desktop/1.0 (personal desktop metadata editor)"
+      }),
+      ctdb: createCtdbAdapter({ http }),
+      netease: createNeteaseAdapter({ http, cookieStore }),
+      qq: createQqMusicAdapter({ http, cookieStore })
+    }
   });
   createWindow();
 

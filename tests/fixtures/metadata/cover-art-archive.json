@@ -1,0 +1,14 @@
+{
+  "images": [
+    {
+      "id": "829521842",
+      "front": true,
+      "approved": true,
+      "image": "https://coverartarchive.org/release/f34dcbf5-2f9d-4f7f-8c8d-3d78deedc84b/829521842.jpg",
+      "thumbnails": {
+        "250": "https://coverartarchive.org/release/f34dcbf5-2f9d-4f7f-8c8d-3d78deedc84b/829521842-250.jpg",
+        "500": "https://coverartarchive.org/release/f34dcbf5-2f9d-4f7f-8c8d-3d78deedc84b/829521842-500.jpg"
+      }
+    }
+  ]
+}

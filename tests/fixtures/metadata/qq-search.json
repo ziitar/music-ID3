@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "data": {
+    "song": {
+      "curnum": 1,
+      "list": [
+        {
+          "songid": 102065756,
+          "songmid": "0039MnYb0qxYhV",
+          "songname": "Mojito",
+          "interval": 185,
+          "albummid": "0016l2F430zMux",
+          "albumname": "Mojito",
+          "singer": [{ "id": 4558, "mid": "0025NhlN2yWrP4", "name": "Jay Chou" }]
+        }
+      ]
+    }
+  }
+}

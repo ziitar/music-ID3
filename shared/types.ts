@@ -127,6 +127,15 @@ export type MetadataCandidate = {
   trackCount?: number;
   tracks?: Array<{ number: number; title: string; artist?: string; durationMs?: number }>;
   cover?: CoverArt;
+  coverUrl?: string;
+  country?: string;
+  format?: string;
+  discId?: string;
+  discIds?: string[];
+  offsets?: number[];
+  toc?: string;
+  totalDurationMs?: number;
+  ctdb?: { status: "match" | "no-match" | "unavailable"; confidence?: number };
   confidence: "high" | "medium" | "low";
   evidence?: string[];
 };

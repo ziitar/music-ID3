@@ -1,0 +1,17 @@
+{
+  "created": "2026-09-04T00:00:00Z",
+  "count": 1,
+  "offset": 0,
+  "releases": [
+    {
+      "id": "f34dcbf5-2f9d-4f7f-8c8d-3d78deedc84b",
+      "score": 100,
+      "title": "Kind of Blue",
+      "date": "1959-08-17",
+      "country": "US",
+      "artist-credit": [{ "name": "Miles Davis", "artist": { "id": "561d854a-6a28-4aa7-8c99-323e6ce46c2a", "name": "Miles Davis" } }],
+      "track-count": 5,
+      "media": [{ "position": 1, "format": "CD", "track-count": 5 }]
+    }
+  ]
+}

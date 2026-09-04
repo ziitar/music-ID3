@@ -1,0 +1,12 @@
+{
+  "code": 200,
+  "songs": [
+    {
+      "id": 1859245776,
+      "name": "Mystery of Love",
+      "dt": 248000,
+      "ar": [{ "id": 553050, "name": "Sufjan Stevens" }],
+      "al": { "id": 129905233, "name": "Call Me by Your Name", "picUrl": "https://p1.music.126.net/example/109951.jpg" }
+    }
+  ]
+}
