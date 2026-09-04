@@ -1,3 +1,6 @@
 # Audio Fixtures
 
-The TagLib test fixture is generated as a valid one-second PCM WAV file in the test's temporary directory. This keeps binary audio out of source control while exercising the real `node-taglib-sharp` read/write path.
+Unit tests generate a valid one-second PCM WAV in a temporary directory. The
+`library` directory contains compact media fixtures for Electron E2E coverage:
+a tagged MP3, a CUE-associated WAV, and a silent 901-second MP3 used to exercise
+whole-track detection. E2E tests copy the directory before making any edits.

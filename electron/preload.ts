@@ -1,5 +1,25 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { ipcChannels, type MusicId3Api } from "../shared/ipc";
+import type { MusicId3Api } from "../shared/ipc";
+
+// Sandboxed preloads may only load Electron and a small set of Node built-ins.
+const ipcChannels = {
+  selectDirectory: "music-id3:select-directory",
+  scanDirectory: "music-id3:scan-directory",
+  cancelScan: "music-id3:cancel-scan",
+  readAudio: "music-id3:read-audio",
+  writeAudio: "music-id3:write-audio",
+  readCue: "music-id3:read-cue",
+  saveCue: "music-id3:save-cue",
+  previewCue: "music-id3:preview-cue",
+  buildCandidateCue: "music-id3:build-candidate-cue",
+  searchMetadata: "music-id3:search-metadata",
+  getMetadataCandidate: "music-id3:get-metadata-candidate",
+  setProviderCookie: "music-id3:set-provider-cookie",
+  testProviderCookie: "music-id3:test-provider-cookie",
+  getProviderCookieStatus: "music-id3:get-provider-cookie-status",
+  clearOnlineCache: "music-id3:clear-online-cache",
+  scanProgress: "music-id3:scan-progress"
+} as const;
 
 const musicId3: MusicId3Api = {
   selectDirectory: () => ipcRenderer.invoke(ipcChannels.selectDirectory),
