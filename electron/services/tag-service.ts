@@ -1,5 +1,18 @@
 import path from "node:path";
-import { ByteVector, File as TagLibFile, Picture, type Tag } from "node-taglib-sharp";
+import {
+  ApeTag,
+  ApeTagItemType,
+  ByteVector,
+  File as TagLibFile,
+  Id3v2TextInformationFrame,
+  Id3v2UserTextInformationFrame,
+  Picture,
+  StringType,
+  TagTypes,
+  XiphComment,
+  type Id3v2Tag,
+  type Tag
+} from "node-taglib-sharp";
 import type { AudioMetadata, CommonMetadata, CoverArt, MetadataPatch, WriteResult } from "../../shared/types";
 
 type MetadataField = keyof CommonMetadata;
@@ -7,6 +20,7 @@ type MetadataField = keyof CommonMetadata;
 type TagLibHandle = {
   tag: Tag;
   properties: { durationMilliseconds: number; codecs: Array<{ description: string }> };
+  getTag?(type: TagTypes, create: boolean): Tag;
   save(): void;
   dispose(): void;
 };
@@ -26,20 +40,69 @@ const allCommonFields: readonly MetadataField[] = [
   "date", "genre", "composer", "comment", "lyrics", "copyright", "cover"
 ];
 
-const wavFields: readonly MetadataField[] = ["title", "artist", "album", "genre", "comment", "copyright"];
-
 function extensionFor(filePath: string): string {
   return path.extname(filePath).slice(1).toLowerCase();
 }
 
 function fieldsSupportedBy(format: string): readonly MetadataField[] {
-  if (format === "wav") {
-    return wavFields;
-  }
   if (format === "wv") {
     return [];
   }
   return allCommonFields;
+}
+
+function addRawValue(raw: AudioMetadata["raw"], key: string, values: string[]): void {
+  const textValues = values.filter((value) => value !== "");
+  if (textValues.length === 0) {
+    return;
+  }
+  const previous = raw[key];
+  raw[key] = previous === undefined
+    ? textValues.length === 1 ? textValues[0] : textValues
+    : [...(Array.isArray(previous) ? previous : [previous]), ...textValues];
+}
+
+function concreteTag(handle: TagLibHandle, type: TagTypes): Tag | undefined {
+  if (handle.tag.tagTypes === type) {
+    return handle.tag;
+  }
+  return handle.getTag?.(type, false)
+    ?? (typeof (handle.tag as Tag & { getTag?: (tagType: TagTypes) => Tag }).getTag === "function"
+      ? (handle.tag as Tag & { getTag(tagType: TagTypes): Tag }).getTag(type)
+      : undefined);
+}
+
+function extractRawTags(handle: TagLibHandle): AudioMetadata["raw"] {
+  const raw: AudioMetadata["raw"] = {};
+  const id3 = concreteTag(handle, TagTypes.Id3v2) as Id3v2Tag | undefined;
+  if (id3) {
+    for (const frame of id3.frames) {
+      if (frame instanceof Id3v2UserTextInformationFrame) {
+        addRawValue(raw, `TXXX:${frame.description}`, frame.text);
+      } else if (frame instanceof Id3v2TextInformationFrame) {
+        addRawValue(raw, frame.frameId.toString(), frame.text);
+      }
+    }
+  }
+
+  const xiph = concreteTag(handle, TagTypes.Xiph) as XiphComment | undefined;
+  if (xiph) {
+    for (const key of xiph.fieldNames) {
+      if (key !== "METADATA_BLOCK_PICTURE" && key !== "COVERART") {
+        addRawValue(raw, key, xiph.getField(key));
+      }
+    }
+  }
+
+  const ape = concreteTag(handle, TagTypes.Ape) as ApeTag | undefined;
+  if (ape) {
+    for (const item of ape.items) {
+      if (item.type === ApeTagItemType.Text) {
+        addRawValue(raw, item.key, item.text);
+      }
+    }
+  }
+  return raw;
 }
 
 function first(values: string[] | undefined): string | undefined {
@@ -70,17 +133,32 @@ function mapMetadata(handle: TagLibHandle, format: string): AudioMetadata {
     copyright: tag.copyright || undefined,
     cover: cover ? { mimeType: cover.mimeType, data: Buffer.from(cover.data.toByteArray()).toString("base64") } : undefined
   };
-  const raw = Object.fromEntries(
-    Object.entries(common)
-      .filter(([field, value]) => field !== "cover" && value !== undefined && value !== "")
-      .map(([field, value]) => [field, typeof value === "number" ? String(value) : value])
-  ) as AudioMetadata["raw"];
   return {
     common,
-    raw,
+    raw: extractRawTags(handle),
     durationMs: Math.round(handle.properties?.durationMilliseconds ?? 0),
     format,
   };
+}
+
+function validatePatch(patch: MetadataPatch): WriteResult | undefined {
+  if (patch.selectedFields.includes("date") && patch.fields.date !== undefined && !/^\d{4}$/.test(patch.fields.date)) {
+    return { ok: false, error: "Date writes require an exact four-digit year", unsupportedFields: ["date"] };
+  }
+  return undefined;
+}
+
+function selectedFieldsMatch(metadata: AudioMetadata, patch: MetadataPatch): MetadataField[] {
+  return patch.selectedFields.filter((field) => {
+    const expected = patch.fields[field];
+    const actual = metadata.common[field];
+    if (field === "cover") {
+      const expectedCover = expected as CoverArt | undefined;
+      const actualCover = actual as CoverArt | undefined;
+      return expectedCover?.mimeType !== actualCover?.mimeType || expectedCover?.data !== actualCover?.data;
+    }
+    return expected !== actual;
+  });
 }
 
 function assignField(tag: Tag, field: MetadataField, value: CommonMetadata[MetadataField]): void {
@@ -132,6 +210,10 @@ export function createTagService(adapter: TagLibAdapter = tagLibAdapter) {
 
   async function writeAudioMetadata(filePath: string, patch: MetadataPatch): Promise<WriteResult> {
     const format = extensionFor(filePath);
+    const validationError = validatePatch(patch);
+    if (validationError) {
+      return validationError;
+    }
     const supportedFields = fieldsSupportedBy(format);
     const unsupportedFields = patch.selectedFields.filter((field) => !supportedFields.includes(field));
     if (unsupportedFields.length > 0) {
@@ -149,8 +231,12 @@ export function createTagService(adapter: TagLibAdapter = tagLibAdapter) {
         handle.dispose();
       }
       const metadata = await readAudioMetadata(filePath);
-      return metadata.errors?.length
-        ? { ok: false, error: metadata.errors.join("; ") }
+      if (metadata.errors?.length) {
+        return { ok: false, error: metadata.errors.join("; ") };
+      }
+      const mismatchedFields = selectedFieldsMatch(metadata, patch);
+      return mismatchedFields.length > 0
+        ? { ok: false, error: `Metadata write verification failed for ${mismatchedFields.join(", ")}`, unsupportedFields: mismatchedFields }
         : { ok: true, metadata };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };

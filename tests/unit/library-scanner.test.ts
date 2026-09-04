@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { isSupportedAudioPath, isSuspectedWholeTrack, wholeTrackStatus } from "../../electron/services/audio-format";
-import { scanDirectory } from "../../electron/services/library-scanner";
+import { createLibraryScanner, scanDirectory } from "../../electron/services/library-scanner";
+import type { AudioMetadata } from "../../shared/types";
 
 const temporaryDirectories: string[] = [];
 
@@ -125,6 +126,102 @@ describe("library scanner", () => {
       path: audioPath,
       durationMs: 15 * 60 * 1000 + 1,
       wholeTrackStatus: "suspected"
+    });
+  });
+
+  it("keeps separate CUE files and associates every FILE in a multi-FILE CUE", async () => {
+    const root = await createTempDir();
+    const firstAudio = path.join(root, "first.mp3");
+    const secondAudio = path.join(root, "second.flac");
+    const firstCue = path.join(root, "first.cue");
+    const secondCue = path.join(root, "second.cue");
+    await Promise.all([writeFile(firstAudio, "bad"), writeFile(secondAudio, "bad")]);
+    await writeFile(firstCue, [
+      'FILE "first.mp3" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00",
+      'FILE "second.flac" WAVE',
+      "  TRACK 02 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n"));
+    await writeFile(secondCue, [
+      'FILE "second.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n"));
+
+    const summary = await scanDirectory(root, () => undefined);
+    const firstCueItem = summary.items.find((item) => item.kind === "cue" && item.path === firstCue);
+    const secondCueItem = summary.items.find((item) => item.kind === "cue" && item.path === secondCue);
+    const firstAudioItem = summary.items.find((item) => item.kind === "audio" && item.path === firstAudio);
+    const secondAudioItem = summary.items.find((item) => item.kind === "audio" && item.path === secondAudio);
+
+    expect(firstCueItem).toMatchObject({ referencedFiles: [firstAudio, secondAudio] });
+    expect(secondCueItem).toMatchObject({ referencedFiles: [secondAudio] });
+    expect(firstAudioItem).toMatchObject({ cuePath: firstCue });
+    expect(secondAudioItem).toMatchObject({ cuePath: secondCue });
+  });
+
+  it("emits an early item while a later metadata read remains pending", async () => {
+    const root = await createTempDir();
+    const earlyPath = path.join(root, "early.mp3");
+    const slowPath = path.join(root, "slow.mp3");
+    await Promise.all([writeFile(earlyPath, "bad"), writeFile(slowPath, "bad")]);
+    let releaseSlowRead!: () => void;
+    const slowRead = new Promise<void>((resolve) => { releaseSlowRead = resolve; });
+    const scanner = createLibraryScanner({
+      readAudioMetadata: async (filePath): Promise<AudioMetadata> => {
+        if (filePath === slowPath) {
+          await slowRead;
+        }
+        return { common: {}, raw: {}, durationMs: 0, format: "mp3" };
+      }
+    });
+    let firstEmission!: (path: string) => void;
+    const emittedFirst = new Promise<string>((resolve) => { firstEmission = resolve; });
+    const scan = scanner.scanDirectory(root, (item) => firstEmission(item.path));
+
+    await expect(emittedFirst).resolves.toBe(earlyPath);
+    releaseSlowRead();
+    await scan;
+  });
+
+  it("keeps scanned items when a nested directory read or an item stat fails", async () => {
+    const root = await createTempDir();
+    const blockedDirectory = path.join(root, "blocked");
+    const goodPath = path.join(root, "good.mp3");
+    const statFailurePath = path.join(root, "stat-failure.mp3");
+    await mkdir(blockedDirectory);
+    await Promise.all([writeFile(goodPath, "bad"), writeFile(statFailurePath, "bad")]);
+    const scanner = createLibraryScanner({
+      readdir: async (directory, options) => {
+        if (directory === blockedDirectory) {
+          throw new Error("access denied");
+        }
+        return readdir(directory, options);
+      },
+      stat: async (filePath) => {
+        if (filePath === statFailurePath) {
+          throw new Error("stat denied");
+        }
+        return stat(filePath);
+      },
+      readAudioMetadata: async (filePath) => filePath === goodPath
+        ? { common: {}, raw: {}, durationMs: 0, format: "mp3" }
+        : Promise.reject(new Error("metadata denied"))
+    });
+
+    const summary = await scanner.scanDirectory(root, () => undefined);
+
+    expect(summary.items.map((item) => item.path)).toEqual([goodPath, statFailurePath]);
+    expect(summary.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: blockedDirectory, error: "access denied" }),
+      expect.objectContaining({ path: statFailurePath, error: "stat denied" }),
+      expect.objectContaining({ path: statFailurePath, error: "metadata denied" })
+    ]));
+    expect(summary.items.find((item) => item.kind === "audio" && item.path === statFailurePath)).toMatchObject({
+      sizeBytes: 0,
+      metadata: { errors: ["metadata denied", "stat denied"] }
     });
   });
 });
