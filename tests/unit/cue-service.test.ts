@@ -310,6 +310,33 @@ describe("CUE service", () => {
     ].join("\n"));
   });
 
+  it("keeps leading preserved lines before newly inserted modeled directives in source scopes", () => {
+    const rawText = [
+      "; album header",
+      "",
+      'FILE "disc.flac" WAVE',
+      "  ; file header",
+      "  TRACK 01 AUDIO",
+      "    ; track header",
+      "    INDEX 01 00:00:00"
+    ].join("\n");
+    const state = parseCue(rawText, "D:/Music/headers.cue");
+    state.parsed.title = "Album";
+    state.parsed.tracks[0].title = "Track";
+
+    expect(serializeCue(state.parsed, "utf8").toString("utf8")).toBe([
+      "; album header",
+      "",
+      'TITLE "Album"',
+      'FILE "disc.flac" WAVE',
+      "  ; file header",
+      "  TRACK 01 AUDIO",
+      "    ; track header",
+      '    TITLE "Track"',
+      "    INDEX 01 00:00:00"
+    ].join("\n"));
+  });
+
   it("keeps an index tail comment after INDEX 01 when INDEX 00 is added", () => {
     const rawText = [
       'FILE "disc.flac" WAVE',
@@ -382,6 +409,38 @@ describe("CUE service", () => {
       "  TRACK 01 AUDIO",
       "    INDEX 01 00:00:00"
     ].join("\n"));
+  });
+
+  it("rejects duplicate desired INDEX numbers in a source-backed track", () => {
+    const state = parseCue([
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00"
+    ].join("\n"), "D:/Music/duplicate-source.cue");
+    state.parsed.tracks[0].indexes.push({ number: 1, time: "00:01:00" });
+
+    expect(() => serializeCue(state.parsed, "utf8")).toThrow(/TRACK 1.*duplicate INDEX 01/i);
+  });
+
+  it("rejects duplicate INDEX numbers in a canonical document while allowing distinct 00, 01, and 02", () => {
+    const document: CueDocument = {
+      remarks: [],
+      files: [{ path: "disc.flac" }],
+      tracks: [{
+        number: 1,
+        fileIndex: 0,
+        indexes: [
+          { number: 0, time: "00:00:00" },
+          { number: 1, time: "00:00:10" },
+          { number: 2, time: "00:00:20" }
+        ]
+      }],
+      unknownLines: []
+    };
+
+    expect(serializeCue(document, "utf8").toString("utf8")).toContain("    INDEX 02 00:00:20");
+    document.tracks[0].indexes.push({ number: 2, time: "00:00:30" });
+    expect(() => serializeCue(document, "utf8")).toThrow(/TRACK 1.*duplicate INDEX 02/i);
   });
 
   it.each(["1" as unknown as number, Number.NaN, -1, 0.5, 999])(

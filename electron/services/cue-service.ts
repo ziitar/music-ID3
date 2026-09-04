@@ -439,7 +439,12 @@ function overlayScope(sourceLines: string[], scope: SourceScope, desired: Modele
           break;
         }
       }
-      entries.splice(after < 0 ? 0 : after, 0, { kind: "modeled", key: line.key, text: line.text, desiredOrder });
+      entries.splice(after < 0 ? entries.length : after, 0, {
+        kind: "modeled",
+        key: line.key,
+        text: line.text,
+        desiredOrder
+      });
     }
     used.add(line.key);
   }
@@ -504,10 +509,17 @@ export function validateCueDocument(document: CueDocument, layout = structuredLa
     previousFileIndex = fileIndex;
     if (track.pregap) cueTimeFrames(track.pregap);
     if (track.postgap) cueTimeFrames(track.postgap);
+    const indexNumbers = new Set<number>();
     for (const index of track.indexes) {
       if (!Number.isInteger(index.number) || index.number < 0 || index.number > 99) {
         throw new Error(`TRACK ${track.number} has an invalid INDEX number`);
       }
+      if (indexNumbers.has(index.number)) {
+        throw new Error(
+          `TRACK ${track.number} has duplicate INDEX ${String(index.number).padStart(2, "0")}`
+        );
+      }
+      indexNumbers.add(index.number);
       cueTimeFrames(index.time);
     }
     const index01 = track.indexes.find((index) => index.number === 1);
