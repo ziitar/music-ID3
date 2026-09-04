@@ -52,6 +52,14 @@ export type CueTrack = {
   indexes: Array<{ number: number; time: string }>;
 };
 
+export type CuePreservedLine = {
+  text: string;
+  scope: "album" | "file" | "track";
+  fileIndex?: number;
+  trackIndex?: number;
+  order: number;
+};
+
 export type CueDocument = {
   title?: string;
   performer?: string;
@@ -60,6 +68,7 @@ export type CueDocument = {
   files: Array<{ path: string; type?: string }>;
   tracks: CueTrack[];
   unknownLines: string[];
+  preservedLines?: CuePreservedLine[];
   sourceText?: string;
   sourceFingerprint?: string;
 };

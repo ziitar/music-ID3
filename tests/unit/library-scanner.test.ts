@@ -121,7 +121,13 @@ describe("library scanner", () => {
       Buffer.from([0xef, 0xbb, 0xbf]),
       Buffer.from('TITLE "Album"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00')
     ]));
-    await writeFile(brokenCuePath, "INDEX 01 00:00:00");
+    await writeFile(brokenCuePath, [
+      'FILE "disc.flac" WAVE',
+      "  TRACK 01 AUDIO",
+      "    INDEX 01 00:00:00",
+      "  TRACK 02 AUDIO",
+      '    TITLE "Dangling"'
+    ].join("\n"));
 
     const summary = await scanDirectory(root, () => undefined);
     const valid = summary.items.find((item) => item.kind === "cue" && item.path === validCuePath);
@@ -135,8 +141,8 @@ describe("library scanner", () => {
     expect(broken).toMatchObject({
       kind: "cue",
       path: brokenCuePath,
-      rawText: "INDEX 01 00:00:00",
-      parseError: expect.stringMatching(/No track found/i)
+      rawText: expect.stringContaining("TRACK 02 AUDIO"),
+      parseError: expect.stringMatching(/TRACK 02.*INDEX 01/i)
     });
   });
 

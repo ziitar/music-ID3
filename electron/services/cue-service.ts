@@ -16,6 +16,7 @@ import type {
   CueDocument,
   CueDocumentState,
   CueEncoding,
+  CuePreservedLine,
   CueTrack,
   SaveCueInput,
   SaveCueResult
@@ -75,7 +76,8 @@ function documentFingerprint(document: CueDocument): string {
     remarks: document.remarks,
     files: document.files,
     tracks: document.tracks,
-    unknownLines: document.unknownLines
+    unknownLines: document.unknownLines,
+    preservedLines: document.preservedLines ?? []
   });
 }
 
@@ -114,13 +116,30 @@ function parserDocument(cue: ICueSheet, rawText: string): CueDocument {
     }
   }
 
-  const unknownLines = rawText.split(/\r?\n/).filter((line) => {
-    if (line.trim() === "") {
-      return false;
-    }
+  const preservedLines: CuePreservedLine[] = [];
+  let fileIndex = -1;
+  let trackIndex = -1;
+  for (const [order, line] of rawText.split(/\r?\n/).entries()) {
     const command = cueCommand(line);
-    return !command || !modeledCommands.has(command);
-  });
+    if (command === "FILE") {
+      fileIndex += 1;
+      trackIndex = -1;
+      continue;
+    }
+    if (command === "TRACK") {
+      trackIndex += 1;
+      continue;
+    }
+    if (line.trim() !== "" && command && modeledCommands.has(command)) {
+      continue;
+    }
+    preservedLines.push(fileIndex < 0
+      ? { text: line, scope: "album", order }
+      : trackIndex < 0
+        ? { text: line, scope: "file", fileIndex, order }
+        : { text: line, scope: "track", fileIndex, trackIndex: tracks.findIndex((track) => track.fileIndex === fileIndex) + trackIndex, order });
+  }
+  const unknownLines = preservedLines.filter((line) => line.text.trim() !== "").map((line) => line.text);
   const document: CueDocument = {
     ...(cue.title ? { title: cue.title } : {}),
     ...(cue.performer ? { performer: cue.performer } : {}),
@@ -128,14 +147,45 @@ function parserDocument(cue: ICueSheet, rawText: string): CueDocument {
     remarks: cue.rem ?? [],
     files,
     tracks,
-    unknownLines
+    unknownLines,
+    preservedLines
   };
   document.sourceText = rawText;
   document.sourceFingerprint = documentFingerprint(document);
   return document;
 }
 
+function validateRawTrackStructure(rawText: string): void {
+  let activeAudioTrack: { number: string; hasIndex01: boolean } | undefined;
+  const finishTrack = (): void => {
+    if (activeAudioTrack && !activeAudioTrack.hasIndex01) {
+      throw new Error(`TRACK ${activeAudioTrack.number} AUDIO requires INDEX 01`);
+    }
+    activeAudioTrack = undefined;
+  };
+
+  for (const line of rawText.split(/\r?\n/)) {
+    const track = line.trim().match(/^TRACK\s+(\d+)\s+(\S+)/);
+    if (track) {
+      finishTrack();
+      if (track[2].toUpperCase() === "AUDIO") {
+        activeAudioTrack = { number: track[1], hasIndex01: false };
+      }
+      continue;
+    }
+    if (/^FILE(?:\s+|$)/.test(line.trim())) {
+      finishTrack();
+      continue;
+    }
+    if (activeAudioTrack && /^INDEX\s+01(?:\s+|$)/.test(line.trim())) {
+      activeAudioTrack.hasIndex01 = true;
+    }
+  }
+  finishTrack();
+}
+
 function parseWithCueParser(rawText: string, filePath: string): ICueSheet {
+  validateRawTrackStructure(rawText);
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "music-id3-cue-parser-"));
   const temporaryPath = path.join(temporaryDirectory, path.basename(filePath) || "document.cue");
   const parserText = rawText.split(/\r?\n/).map((line) => {
@@ -186,6 +236,13 @@ function quote(value: string): string {
 
 function canonicalCueText(document: CueDocument): string {
   const lines: string[] = [];
+  const preserved = (scope: CuePreservedLine["scope"], fileIndex?: number, trackIndex?: number): string[] => (
+    document.preservedLines ?? []
+  )
+    .filter((line) => line.scope === scope && line.fileIndex === fileIndex && line.trackIndex === trackIndex)
+    .sort((left, right) => left.order - right.order)
+    .map((line) => line.text);
+  lines.push(...preserved("album"));
   for (const remark of document.remarks) {
     lines.push(`REM ${remark}`);
   }
@@ -195,11 +252,16 @@ function canonicalCueText(document: CueDocument): string {
 
   for (const [fileIndex, file] of document.files.entries()) {
     lines.push(`FILE ${quote(file.path)} ${file.type ?? "WAVE"}`);
-    for (const track of document.tracks.filter((candidate) => (candidate.fileIndex ?? 0) === fileIndex)) {
+    lines.push(...preserved("file", fileIndex));
+    for (const [trackIndex, track] of document.tracks.entries()) {
+      if ((track.fileIndex ?? 0) !== fileIndex) {
+        continue;
+      }
       lines.push(`  TRACK ${String(track.number).padStart(2, "0")} ${track.type ?? "AUDIO"}`);
       if (track.title) lines.push(`    TITLE ${quote(track.title)}`);
       if (track.performer) lines.push(`    PERFORMER ${quote(track.performer)}`);
       if (track.songwriter) lines.push(`    SONGWRITER ${quote(track.songwriter)}`);
+      lines.push(...preserved("track", fileIndex, trackIndex));
       if (track.pregap) lines.push(`    PREGAP ${track.pregap}`);
       for (const index of track.indexes) {
         lines.push(`    INDEX ${String(index.number).padStart(2, "0")} ${index.time}`);
@@ -207,7 +269,9 @@ function canonicalCueText(document: CueDocument): string {
       if (track.postgap) lines.push(`    POSTGAP ${track.postgap}`);
     }
   }
-  lines.push(...document.unknownLines);
+  if (!document.preservedLines) {
+    lines.push(...document.unknownLines);
+  }
   return lines.join("\n");
 }
 
@@ -230,6 +294,7 @@ export function validateCueDocument(document: CueDocument): void {
   }
 
   const lastIndexByFile = new Map<number, number>();
+  let previousFileIndex = -1;
   for (const [position, track] of document.tracks.entries()) {
     if (!Number.isInteger(track.number) || track.number !== position + 1) {
       throw new Error("CUE TRACK numbers must be sequential starting at 1");
@@ -238,6 +303,10 @@ export function validateCueDocument(document: CueDocument): void {
     if (!document.files[fileIndex]) {
       throw new Error(`TRACK ${track.number} references an invalid FILE block`);
     }
+    if (fileIndex < previousFileIndex) {
+      throw new Error("TRACK FILE indices must be nondecreasing");
+    }
+    previousFileIndex = fileIndex;
     if (track.pregap) cueTimeFrames(track.pregap);
     if (track.postgap) cueTimeFrames(track.postgap);
     for (const index of track.indexes) {
@@ -257,14 +326,48 @@ export function validateCueDocument(document: CueDocument): void {
     }
     lastIndexByFile.set(fileIndex, frames);
   }
+
+  for (const line of document.preservedLines ?? []) {
+    if (!Number.isInteger(line.order) || line.order < 0) {
+      throw new Error("Preserved CUE lines require a non-negative order");
+    }
+    const command = cueCommand(line.text);
+    if (command && modeledCommands.has(command)) {
+      throw new Error(`Structured directive ${command} cannot be stored as a preserved line`);
+    }
+    if (line.scope === "album") {
+      if (line.fileIndex !== undefined || line.trackIndex !== undefined) {
+        throw new Error("Album-scoped preserved lines cannot reference a FILE or TRACK");
+      }
+    } else if (line.scope === "file") {
+      if (line.fileIndex === undefined || !document.files[line.fileIndex] || line.trackIndex !== undefined) {
+        throw new Error("File-scoped preserved line has an invalid FILE index");
+      }
+    } else if (
+      line.fileIndex === undefined
+      || line.trackIndex === undefined
+      || !document.files[line.fileIndex]
+      || !document.tracks[line.trackIndex]
+      || (document.tracks[line.trackIndex].fileIndex ?? 0) !== line.fileIndex
+    ) {
+      throw new Error("Track-scoped preserved line has an invalid anchor");
+    }
+  }
 }
 
 export function serializeCue(document: CueDocument, encoding: CueEncoding): Buffer {
   validateCueDocument(document);
-  const text = document.sourceText !== undefined
-    && document.sourceFingerprint === documentFingerprint(document)
-    ? document.sourceText
-    : canonicalCueText(document);
+  let text = canonicalCueText(document);
+  if (document.sourceText !== undefined) {
+    const sourceDocument = parserDocument(
+      parseWithCueParser(document.sourceText, "submitted-source.cue"),
+      document.sourceText
+    );
+    validateCueDocument(sourceDocument);
+    if (documentFingerprint(sourceDocument) === documentFingerprint(document)) {
+      text = document.sourceText;
+    }
+  }
   return encodeCueText(text, encoding);
 }
 
@@ -309,6 +412,7 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
 
   async function saveCueFile(input: SaveCueInput): Promise<SaveCueResult> {
     const temporaryPath = `${input.path}.${randomUUID()}.tmp`;
+    const temporaryPaths = new Set([temporaryPath]);
     try {
       let bytes: Buffer;
       if (input.rawText && input.rawText !== input.document.sourceText) {
@@ -317,7 +421,9 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
           throw new Error(rawState.parseError);
         }
         validateCueDocument(rawState.parsed);
-        bytes = encodeCueText(input.rawText, input.encoding);
+        bytes = documentFingerprint(rawState.parsed) === documentFingerprint(input.document)
+          ? encodeCueText(input.rawText, input.encoding)
+          : serializeCue(input.document, input.encoding);
       } else {
         bytes = serializeCue(input.document, input.encoding);
       }
@@ -325,17 +431,39 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
       const replacing = await pathExists(input.path, dependencies);
       await dependencies.writeFile(temporaryPath, bytes);
       let backupPath: string | undefined;
+      let backupTemporaryPath: string | undefined;
       if (replacing) {
         backupPath = `${input.path}.bak`;
-        await dependencies.copyFile(input.path, backupPath);
+        backupTemporaryPath = `${backupPath}.${randomUUID()}.tmp`;
+        temporaryPaths.add(backupTemporaryPath);
+        await dependencies.copyFile(input.path, backupTemporaryPath);
       }
       await dependencies.rename(temporaryPath, input.path);
+      temporaryPaths.delete(temporaryPath);
+      if (backupPath && backupTemporaryPath) {
+        try {
+          await dependencies.rename(backupTemporaryPath, backupPath);
+          temporaryPaths.delete(backupTemporaryPath);
+        } catch (backupError) {
+          try {
+            await dependencies.rename(backupTemporaryPath, input.path);
+            temporaryPaths.delete(backupTemporaryPath);
+          } catch (rollbackError) {
+            const backupMessage = backupError instanceof Error ? backupError.message : String(backupError);
+            const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+            throw new Error(`${backupMessage}; failed to restore original CUE: ${rollbackMessage}`);
+          }
+          throw backupError;
+        }
+      }
       return { ok: true, path: input.path, ...(backupPath ? { backupPath } : {}) };
     } catch (error) {
-      try {
-        await dependencies.unlink(temporaryPath);
-      } catch {
-        // The temporary file may not have been created or may already have been renamed.
+      for (const filePath of temporaryPaths) {
+        try {
+          await dependencies.unlink(filePath);
+        } catch {
+          // A temporary file may not have been created or may already have been renamed.
+        }
       }
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }

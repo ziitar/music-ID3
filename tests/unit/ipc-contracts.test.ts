@@ -133,4 +133,39 @@ describe("IPC contracts", () => {
     expect(read).toMatchObject({ path: cuePath, parsed: { title: "Before" } });
     expect(saved).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
   });
+
+  it("rejects forged CUE source text received from the renderer", async () => {
+    const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
+    const root = await createTempDir();
+    const cuePath = path.join(root, "forged.cue");
+    const document: CueDocument = {
+      title: "Safe",
+      remarks: [],
+      files: [{ path: "disc.flac" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: [],
+      sourceText: "THIS IS NOT A CUE",
+      sourceFingerprint: JSON.stringify({
+        title: "Safe",
+        remarks: [],
+        files: [{ path: "disc.flac" }],
+        tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+        unknownLines: []
+      })
+    };
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" }
+    });
+
+    const result = await handlers.get(ipcChannels.saveCue)?.({}, {
+      path: cuePath,
+      document,
+      rawText: document.sourceText,
+      encoding: "utf8"
+    });
+
+    expect(result).toEqual({ ok: false, error: expect.any(String) });
+  });
 });
