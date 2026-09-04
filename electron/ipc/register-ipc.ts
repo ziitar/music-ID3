@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { OpenDialogOptions } from "electron";
 import { ipcChannels } from "../../shared/ipc";
-import type { CookieSource } from "../../shared/types";
+import type { CookieSource, MetadataPatch, ScanProgress } from "../../shared/types";
 import type { CookieStore } from "../services/cookie-store";
+import { scanDirectory } from "../services/library-scanner";
+import { readAudioMetadata, writeAudioMetadata } from "../services/tag-service";
 
 type IpcMainLike = {
   handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
@@ -27,6 +30,22 @@ function asCookieSource(value: unknown): CookieSource {
   throw new TypeError("Cookie source must be netease or qq");
 }
 
+function asMetadataPatch(value: unknown): MetadataPatch {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Metadata patch must be an object");
+  }
+  const patch = value as Partial<MetadataPatch>;
+  if (!patch.fields || typeof patch.fields !== "object" || Array.isArray(patch.fields) || !Array.isArray(patch.selectedFields)) {
+    throw new TypeError("Metadata patch must include fields and selectedFields");
+  }
+  return patch as MetadataPatch;
+}
+
+function publishScanProgress(event: unknown, progress: ScanProgress): void {
+  const sender = (event as { sender?: { send(channel: string, payload: ScanProgress): void } } | undefined)?.sender;
+  sender?.send(ipcChannels.scanProgress, progress);
+}
+
 function unavailable(operation: string): never {
   throw new Error(`${operation} is not available yet`);
 }
@@ -37,19 +56,35 @@ export function registerIpcHandlers({ ipcMain, showOpenDialog, cookieStore }: Re
     return result.canceled ? undefined : result.filePaths[0];
   });
 
-  ipcMain.handle(ipcChannels.scanDirectory, (_event, directoryPath) => {
-    asString(directoryPath, "path");
-    return unavailable("Directory scanning");
+  ipcMain.handle(ipcChannels.scanDirectory, (event, directoryPath) => {
+    const root = asString(directoryPath, "path");
+    const scanId = randomUUID();
+    let scannedCount = 0;
+    void scanDirectory(root, (item) => {
+      scannedCount += 1;
+      publishScanProgress(event, { scanId, item, scannedCount, phase: "scanning" });
+    }).then((summary) => {
+      for (const scanError of summary.errors) {
+        publishScanProgress(event, { scanId, scannedCount, phase: "error", error: `${scanError.path}: ${scanError.error}` });
+      }
+      publishScanProgress(event, { scanId, scannedCount, totalCount: summary.items.length, phase: "complete" });
+    }).catch((error) => {
+      publishScanProgress(event, {
+        scanId,
+        scannedCount,
+        phase: "error",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return { ok: true, scanId };
   });
 
   ipcMain.handle(ipcChannels.readAudio, (_event, audioPath) => {
-    asString(audioPath, "path");
-    return unavailable("Audio metadata reads");
+    return readAudioMetadata(asString(audioPath, "path"));
   });
 
-  ipcMain.handle(ipcChannels.writeAudio, (_event, audioPath) => {
-    asString(audioPath, "path");
-    return unavailable("Audio metadata writes");
+  ipcMain.handle(ipcChannels.writeAudio, (_event, audioPath, patch) => {
+    return writeAudioMetadata(asString(audioPath, "path"), asMetadataPatch(patch));
   });
 
   ipcMain.handle(ipcChannels.readCue, (_event, cuePath) => {
