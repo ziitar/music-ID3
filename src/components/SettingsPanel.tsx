@@ -30,12 +30,15 @@ export function SettingsPanel() {
   };
   const current = providers[source];
 
-  useEffect(() => () => {
-    mounted.current = false;
-    statusReads.current.netease += 1; statusReads.current.qq += 1;
-    mutations.current.netease += 1; mutations.current.qq += 1;
-    tests.current.netease += 1; tests.current.qq += 1;
-    cacheOperation.current += 1;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      statusReads.current.netease += 1; statusReads.current.qq += 1;
+      mutations.current.netease += 1; mutations.current.qq += 1;
+      tests.current.netease += 1; tests.current.qq += 1;
+      cacheOperation.current += 1;
+    };
   }, []);
   useEffect(() => { update(source, { message: undefined, connectionMessage: undefined }); void refreshStatus(source); }, [source]);
 

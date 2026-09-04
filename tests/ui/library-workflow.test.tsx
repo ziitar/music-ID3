@@ -1,5 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../src/App";
 import { editorStore } from "../../src/stores/editor-store";
@@ -230,6 +231,47 @@ describe("library editing workflow", () => {
     expect(editorStore.getState().item?.path).toBe("D:/音乐/b.flac");
   });
 
+  it("keeps candidate detail completion active through StrictMode effect replay", async () => {
+    render(<StrictMode><App /></StrictMode>);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "details" } });
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /load candidate details/i }));
+
+    await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load candidate details/i })).not.toBeInTheDocument());
+  });
+
+  it("does not capture a candidate write confirmation after unmount", async () => {
+    let resolveCandidate!: (value: Awaited<ReturnType<typeof window.musicId3.getMetadataCandidate>>) => void;
+    vi.mocked(window.musicId3.getMetadataCandidate).mockImplementation(() => new Promise((resolve) => { resolveCandidate = resolve; }));
+    const captureConfirmation = vi.spyOn(editorStore, "captureAudioWriteConfirmation");
+    try {
+      const view = render(<App />);
+      fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+      await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+      progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+      fireEvent.click(await screen.findByText("track.flac"));
+      fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "candidate" } });
+      fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+      fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i }));
+      await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalled());
+
+      view.unmount();
+      await act(async () => {
+        resolveCandidate({ id: "mb-1", source: "musicbrainz", title: "Resolved after unmount", artist: "Artist", confidence: "high" });
+        await Promise.resolve();
+      });
+
+      expect(captureConfirmation).not.toHaveBeenCalled();
+    } finally {
+      captureConfirmation.mockRestore();
+    }
+  });
+
   it("invalidates a manual write confirmation when selection or the editor generation changes", async () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/title value/i), { target: { value: "Changed" } }); fireEvent.click(screen.getByRole("checkbox", { name: /title/i })); fireEvent.click(screen.getByRole("button", { name: /preview diff/i })); fireEvent.click(screen.getByRole("button", { name: /write selected fields/i }));
 
@@ -297,6 +339,26 @@ describe("library editing workflow", () => {
     expect(editorStore.getState().draft.cover).toBeUndefined();
   });
 
+  it("keeps cover read completion active through StrictMode effect replay", async () => {
+    const readers: Array<{ result: ArrayBuffer; onload: null | (() => void); onerror: null | (() => void) }> = [];
+    class MockFileReader {
+      result = new Uint8Array([4, 5, 6]).buffer; onload: null | (() => void) = null; onerror: null | (() => void) = null;
+      constructor() { readers.push(this); }
+      readAsArrayBuffer() {}
+    }
+    vi.stubGlobal("FileReader", MockFileReader);
+    render(<StrictMode><App /></StrictMode>);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/cover file/i), { target: { files: [new File([new Uint8Array([4, 5, 6])], "replacement.png", { type: "image/png" })] } });
+
+    act(() => readers[0].onload?.());
+
+    expect(editorStore.getState().draft.cover).toEqual({ mimeType: "image/png", data: "BAUG" });
+  });
+
   it("requires details reload for a new search result object with the same provider ID", async () => {
     const summaryResult = { id: "same", source: "musicbrainz" as const, title: "Same", confidence: "high" as const };
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValueOnce([{ ...summaryResult }]).mockResolvedValueOnce([{ ...summaryResult }]);
@@ -356,6 +418,58 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenLastCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: { cover: undefined }, selectedFields: ["cover"] })));
   });
 
+  it("does not let a stale cover-clear confirmation cancel a replacement read", async () => {
+    const originalCover = { mimeType: "image/jpeg", data: "AQID" };
+    const readers: Array<{ result: ArrayBuffer; onload: null | (() => void); onerror: null | (() => void); abort: ReturnType<typeof vi.fn> }> = [];
+    class MockFileReader {
+      result = new Uint8Array([4, 5, 6]).buffer; onload: null | (() => void) = null; onerror: null | (() => void) = null; abort = vi.fn();
+      constructor() { readers.push(this); }
+      readAsArrayBuffer() {}
+    }
+    vi.stubGlobal("FileReader", MockFileReader);
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ metadata: { ...audioItem().metadata, common: { ...audioItem().metadata.common, cover: originalCover } }, cover: originalCover, wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.click(screen.getByRole("button", { name: /remove cover/i }));
+    const staleClear = screen.getByRole("button", { name: /confirm clear/i });
+    fireEvent.change(screen.getByLabelText(/cover file/i), { target: { files: [new File([new Uint8Array([4, 5, 6])], "replacement.png", { type: "image/png" })] } });
+
+    fireEvent.click(staleClear);
+
+    expect(readers[0].abort).not.toHaveBeenCalled();
+    expect(editorStore.getState().draft.cover).toEqual(originalCover);
+    expect(window.musicId3.writeAudio).not.toHaveBeenCalled();
+  });
+
+  it("keeps a completed replacement cover safe from its stale clear confirmation", async () => {
+    const originalCover = { mimeType: "image/jpeg", data: "AQID" };
+    const replacementCover = { mimeType: "image/png", data: "BAUG" };
+    const readers: Array<{ result: ArrayBuffer; onload: null | (() => void); onerror: null | (() => void) }> = [];
+    class MockFileReader {
+      result = new Uint8Array([4, 5, 6]).buffer; onload: null | (() => void) = null; onerror: null | (() => void) = null;
+      constructor() { readers.push(this); }
+      readAsArrayBuffer() {}
+    }
+    vi.stubGlobal("FileReader", MockFileReader);
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ metadata: { ...audioItem().metadata, common: { ...audioItem().metadata.common, cover: originalCover } }, cover: originalCover, wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/cover file/i), { target: { files: [new File([new Uint8Array([4, 5, 6])], "replacement.png", { type: "image/png" })] } });
+    fireEvent.click(screen.getByRole("button", { name: /remove cover/i }));
+    const staleClear = screen.getByRole("button", { name: /confirm clear/i });
+
+    staleClear.addEventListener("click", () => readers[0].onload?.(), { capture: true, once: true });
+    fireEvent.click(staleClear);
+
+    expect(screen.queryByRole("button", { name: /confirm clear/i })).not.toBeInTheDocument();
+    expect(editorStore.getState().draft.cover).toEqual(replacementCover);
+    expect(window.musicId3.writeAudio).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /preview diff/i }));
+    fireEvent.click(screen.getByRole("button", { name: /write selected fields/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm write/i }));
+    await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: { cover: replacementCover }, selectedFields: ["cover"] })));
+  });
+
   it("parses raw CUE edits and saves the validated document with selected encoding", async () => {
     render(<App />); const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "gb18030", rawText: 'TITLE "Album"', parsed: { title: "Album", remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [], candidateEncodings: ["utf8", "gb18030"] }; fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /^raw$/i })); fireEvent.change(screen.getByLabelText(/raw cue/i), { target: { value: 'TITLE "Edited"\nFILE "disc.flac" WAVE\n TRACK 01 AUDIO\n  INDEX 01 00:00:00' } }); fireEvent.blur(screen.getByLabelText(/raw cue/i)); await waitFor(() => expect(window.musicId3.previewCue).toHaveBeenCalled()); fireEvent.change(screen.getByLabelText(/encoding/i), { target: { value: "utf8" } }); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(screen.getByRole("button", { name: /confirm cue save/i }));
     await waitFor(() => expect(window.musicId3.saveCue).toHaveBeenCalledWith(expect.objectContaining({ encoding: "utf8", document: expect.objectContaining({ title: "Edited" }) })));
@@ -401,6 +515,35 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.getProviderCookieStatus).mockResolvedValue("configured"); vi.mocked(window.musicId3.searchMetadata).mockRejectedValue(new Error("secret should not render")); vi.mocked(window.musicId3.clearOnlineCache).mockRejectedValue(new Error("cache internals"));
     render(<App />); expect(await screen.findByLabelText(/cookie status/i)).toHaveTextContent("configured"); fireEvent.click(screen.getByText("Settings")); fireEvent.click(screen.getByRole("button", { name: /clear online cache/i })); expect(await screen.findByText(/unable to clear online cache/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "query" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); expect((await screen.findAllByText(/metadata search failed/i)).length).toBeGreaterThan(0); expect(screen.queryByText(/secret should not render/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps Settings async actions active through StrictMode effect replay", async () => {
+    render(<StrictMode><App /></StrictMode>);
+    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByRole("button", { name: /clear online cache/i }));
+
+    await waitFor(() => expect(window.musicId3.clearOnlineCache).toHaveBeenCalled());
+    expect(await screen.findByText("Online cache cleared")).toBeInTheDocument();
+  });
+
+  it("does not refresh Settings status after a save resolves following unmount", async () => {
+    let resolveSave!: () => void;
+    vi.mocked(window.musicId3.setProviderCookie).mockImplementation(() => new Promise<void>((resolve) => { resolveSave = resolve; }));
+    const view = render(<App />);
+    await waitFor(() => expect(window.musicId3.getProviderCookieStatus).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.change(screen.getByLabelText(/^cookie$/i), { target: { value: "saved" } });
+    fireEvent.click(screen.getByRole("button", { name: /save cookie/i }));
+    await waitFor(() => expect(window.musicId3.setProviderCookie).toHaveBeenCalled());
+    const statusReadsBeforeUnmount = vi.mocked(window.musicId3.getProviderCookieStatus).mock.calls.length;
+
+    view.unmount();
+    await act(async () => {
+      resolveSave();
+      await Promise.resolve();
+    });
+
+    expect(window.musicId3.getProviderCookieStatus).toHaveBeenCalledTimes(statusReadsBeforeUnmount);
   });
 
   it("keeps Cookie configuration status separate from connectivity results", async () => {

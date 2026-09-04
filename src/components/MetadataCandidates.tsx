@@ -19,7 +19,10 @@ export function MetadataCandidates() {
     ? [{ value: "musicbrainz", label: "MusicBrainz" }]
     : [{ value: "musicbrainz", label: "MusicBrainz" }, { value: "netease", label: "NetEase" }, { value: "qq", label: "QQ Music" }];
 
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   useEffect(() => { setSource("musicbrainz"); setDetailsLoaded([]); setPending(undefined); }, [state.generation, cueFlow]);
   const loadDetails = async (candidate: MetadataCandidate) => {
     const result = await editorStore.loadCandidateDetails(candidate);
