@@ -38,6 +38,7 @@ const ctdbParser = new XMLParser({
   parseAttributeValue: false,
   processEntities: false,
   allowBooleanAttributes: false,
+  ignoreDeclaration: true,
   trimValues: true
 });
 
@@ -50,7 +51,9 @@ function parseCtdbResponse(xml: string): { nentries: number } | undefined {
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const root = (parsed as Record<string, unknown>).ctdb;
+  const parsedRecord = parsed as Record<string, unknown>;
+  if (Object.keys(parsedRecord).length !== 1 || !Object.prototype.hasOwnProperty.call(parsedRecord, "ctdb")) return undefined;
+  const root = parsedRecord.ctdb;
   if (typeof root !== "object" || root === null || Array.isArray(root)) return undefined;
   const nentries = (root as Record<string, unknown>)["@_nentries"];
   if (typeof nentries !== "string" || !/^\d+$/.test(nentries)) return undefined;

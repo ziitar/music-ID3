@@ -216,6 +216,8 @@ describe("metadata adapters", () => {
     for (const body of [
       '<ctdb status="ok" nentries="0"><broken></ctdb>',
       '<ctdb status="ok" nentries="0"><broken></ctdb><tail />',
+      '<ctdb status="ok" nentries="0" /><tail />',
+      '<ctdb status="ok" nentries="0" /><ctdb status="ok" nentries="0" />',
       '<ctdb status="ok" nentries="zero" />',
       '<ctdb status="ok" nentries="-1" />',
       '<ctdb status="ok" nentries="1.5"><entry /></ctdb>'
