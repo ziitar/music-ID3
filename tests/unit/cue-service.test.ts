@@ -1067,7 +1067,7 @@ describe("CUE service", () => {
     expect(otherContents).toContain(original);
   });
 
-  it("retains and surfaces the only original recovery copy when backup publication and rollback both fail", async () => {
+  it("retains and surfaces the confirmed original when backup publication fails", async () => {
     const directory = await createTempDir();
     const cuePath = path.join(directory, "recovery.cue");
     const backupPath = `${cuePath}.bak`;
@@ -1086,10 +1086,6 @@ describe("CUE service", () => {
       rename: async (source, destination) => {
         if (destination === backupPath) throw new Error("backup publish denied");
         await rename(source, destination);
-      },
-      link: async (source, destination) => {
-        if (destination === cuePath && source.includes(".bak.")) throw new Error("rollback denied");
-        await link(source, destination);
       }
     });
 
@@ -1102,7 +1098,7 @@ describe("CUE service", () => {
     expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
   });
 
-  it("restores the original and preserves the prior backup when backup publication fails", async () => {
+  it("keeps the committed replacement and retains the original when backup publication fails", async () => {
     const directory = await createTempDir();
     const cuePath = path.join(directory, "album.cue");
     const backupPath = `${cuePath}.bak`;
@@ -1127,11 +1123,16 @@ describe("CUE service", () => {
     });
 
     const result = await savePreparedCue(service, { path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "backup-publication-denied" });
+    const retainedContents = await Promise.all(
+      (await readdir(directory))
+        .filter((name) => ![path.basename(cuePath), path.basename(backupPath)].includes(name))
+        .map((name) => readFile(path.join(directory, name), "utf8"))
+    );
 
-    expect(result).toEqual({ ok: false, error: "backup publish denied" });
-    expect(await readFile(cuePath, "utf8")).toBe(original);
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/backup publish denied.*recovery copy retained/i) });
+    expect(await readFile(cuePath)).toEqual(serializeCue(replacement, "utf8"));
     expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
-    expect((await readdir(directory)).sort()).toEqual(["album.cue", "album.cue.bak"]);
+    expect(retainedContents).toContain(original);
   });
 
   it("preserves a destination changed during backup-publication failure and retains the confirmed original", async () => {
@@ -1173,7 +1174,65 @@ describe("CUE service", () => {
         .map((name) => readFile(path.join(directory, name), "utf8"))
     );
 
-    expect(result).toEqual({ ok: false, error: expect.stringMatching(/destination changed.*recovery copy retained/i) });
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/backup publish denied.*recovery copy retained/i) });
+    expect(await readFile(cuePath, "utf8")).toBe(concurrent);
+    expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
+    expect(retainedContents).toContain(original);
+  });
+
+  it("preserves destination bytes mutated after rollback classification and retains the confirmed original", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "post-classification-race.cue");
+    const backupPath = `${cuePath}.bak`;
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const priorBackup = 'TITLE "Prior backup"';
+    const concurrent = 'TITLE "Concurrent after classification"';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    await writeFile(backupPath, priorBackup);
+    let mutationApplied = false;
+    const service = createCueService({
+      rename: async (source, destination) => {
+        if (destination.toString() === backupPath) throw new Error("backup publish denied");
+        await rename(source, destination);
+      },
+      unlink: async (target) => {
+        const targetPath = target.toString();
+        if (
+          !mutationApplied
+          && targetPath.startsWith(`${cuePath}.`)
+          && targetPath.endsWith(".tmp")
+          && !targetPath.includes(".bak.")
+          && !targetPath.includes(".rollback.")
+        ) {
+          mutationApplied = true;
+          await writeFile(target, concurrent);
+        }
+        await unlink(target);
+      }
+    });
+
+    const result = await savePreparedCue(service, {
+      path: cuePath,
+      document: replacement,
+      rawText: "",
+      encoding: "utf8",
+      confirmationToken: "post-classification-race"
+    });
+    const retainedContents = await Promise.all(
+      (await readdir(directory))
+        .filter((name) => ![path.basename(cuePath), path.basename(backupPath)].includes(name))
+        .map((name) => readFile(path.join(directory, name), "utf8"))
+    );
+
+    expect(mutationApplied).toBe(true);
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/recovery copy retained/i) });
     expect(await readFile(cuePath, "utf8")).toBe(concurrent);
     expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
     expect(retainedContents).toContain(original);
