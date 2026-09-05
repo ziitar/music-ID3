@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { OpenDialogOptions } from "electron";
 import { ipcChannels } from "../../shared/ipc";
@@ -14,13 +14,14 @@ import type {
   MetadataPatch,
   MetadataSearchContext,
   MetadataSource,
+  PrepareCueSaveInput,
   SaveCueInput,
   ScanProgress
 } from "../../shared/types";
 import type { CookieStore } from "../services/cookie-store";
 import { isSupportedAudioPath } from "../services/audio-format";
 import { buildCandidateCue } from "../services/cue-candidate";
-import { parseCue, readCue, saveCue } from "../services/cue-service";
+import { cueDocumentForSave, parseCue, prepareCueSave, readCue, saveCue } from "../services/cue-service";
 import { scanDirectory } from "../services/library-scanner";
 import { scoreCandidate, type MetadataAdapter } from "../services/metadata/adapter";
 import type { CtdbAdapter } from "../services/metadata/ctdb-adapter";
@@ -48,6 +49,7 @@ type RegisterIpcHandlersOptions = {
   readAudio?: typeof readAudioMetadata;
   writeAudio?: typeof writeAudioMetadata;
   readCueFile?: typeof readCue;
+  prepareCueSaveFile?: typeof prepareCueSave;
   saveCueFile?: typeof saveCue;
 };
 
@@ -100,19 +102,23 @@ function asCueEncoding(value: unknown): CueEncoding {
   throw new TypeError("Unsupported CUE encoding");
 }
 
-function asSaveCueInput(value: unknown): SaveCueInput {
+function asPrepareCueSaveInput(value: unknown): PrepareCueSaveInput {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("CUE save input must be an object");
-  const input = value as Partial<SaveCueInput>;
+  const input = value as Partial<PrepareCueSaveInput>;
   if (!input.document || typeof input.document !== "object" || Array.isArray(input.document)) throw new TypeError("CUE save input must include a document");
-  const confirmationToken = asNonEmptyString(input.confirmationToken, "confirmationToken");
-  if (confirmationToken.length > 200) throw new TypeError("confirmationToken is too long");
   return {
     path: asString(input.path, "path"),
     document: input.document as SaveCueInput["document"],
     rawText: asString(input.rawText, "rawText"),
-    encoding: asCueEncoding(input.encoding),
-    confirmationToken
+    encoding: asCueEncoding(input.encoding)
   };
+}
+
+function asSaveCueInput(value: unknown): SaveCueInput {
+  const input = asPrepareCueSaveInput(value);
+  const confirmationToken = asNonEmptyString((value as Partial<SaveCueInput>).confirmationToken, "confirmationToken");
+  if (confirmationToken.length > 200) throw new TypeError("confirmationToken is too long");
+  return { ...input, confirmationToken };
 }
 
 function asSearchContext(value: unknown): MetadataSearchContext | undefined {
@@ -156,6 +162,15 @@ function isContained(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+function validatePathCapability(filePath: string, capability: "audio" | "cue" | "directory"): void {
+  if (capability === "audio" && !isSupportedAudioPath(filePath)) throw new Error("Path must use a supported audio extension");
+  if (capability === "cue" && path.extname(filePath).toLocaleLowerCase("en-US") !== ".cue") throw new Error("CUE paths must use the .cue extension");
+}
+
 function publishScanProgress(event: unknown, progress: ScanProgress): void {
   senderFor(event).send?.(ipcChannels.scanProgress, progress);
 }
@@ -174,6 +189,7 @@ export function registerIpcHandlers({
   readAudio = readAudioMetadata,
   writeAudio = writeAudioMetadata,
   readCueFile = readCue,
+  prepareCueSaveFile = prepareCueSave,
   saveCueFile = saveCue
 }: RegisterIpcHandlersOptions): void {
   const authorizations = new Map<number, RendererAuthorization>();
@@ -204,27 +220,75 @@ export function registerIpcHandlers({
   ): Promise<{ sender: SenderLike; authorization: RendererAuthorization; canonicalPath: string }> => {
     const { sender, authorization } = authorizationFor(event);
     const provided = path.resolve(asNonEmptyString(requestedPath, "path"));
-    if (capability === "audio" && !isSupportedAudioPath(provided)) throw new Error("Path must use a supported audio extension");
-    if (capability === "cue" && path.extname(provided).toLocaleLowerCase("en-US") !== ".cue") throw new Error("CUE paths must use the .cue extension");
+    validatePathCapability(provided, capability);
     let canonicalPath: string;
+    let targetExists = true;
     if (allowMissing) {
       try {
         canonicalPath = await realpath(provided);
-      } catch {
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+        try {
+          await lstat(provided);
+          throw new Error("Generated CUE path cannot be an unresolved symbolic link");
+        } catch (entryError) {
+          if (!isMissingPathError(entryError)) throw entryError;
+        }
         const parent = await realpath(path.dirname(provided));
+        if (!(await stat(parent)).isDirectory()) throw new Error("Generated CUE parent must be a directory");
         canonicalPath = path.join(parent, path.basename(provided));
+        targetExists = false;
       }
     } else {
       canonicalPath = await realpath(provided);
     }
     if (!isContained(authorization.canonicalRoot, canonicalPath)) throw new Error("Path is outside the selected directory");
+    if (targetExists) validatePathCapability(canonicalPath, capability);
     if (capability === "directory" && !(await stat(canonicalPath)).isDirectory()) throw new Error("Scan path must be a directory");
     return { sender, authorization, canonicalPath };
   };
+  const resolveCueReferencePath = async (authorization: RendererAuthorization, referencedPath: string): Promise<string> => {
+    let existingAncestor = referencedPath;
+    const missingSegments: string[] = [];
+    let canonicalPath: string;
+    while (true) {
+      try {
+        canonicalPath = path.join(await realpath(existingAncestor), ...missingSegments);
+        break;
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+        try {
+          await lstat(existingAncestor);
+          throw new Error("CUE reference cannot use an unresolved symbolic link");
+        } catch (entryError) {
+          if (!isMissingPathError(entryError)) throw entryError;
+        }
+        const parent = path.dirname(existingAncestor);
+        if (parent === existingAncestor) throw error;
+        missingSegments.unshift(path.basename(existingAncestor));
+        existingAncestor = parent;
+      }
+    }
+    if (!isContained(authorization.canonicalRoot, canonicalPath)) throw new Error("CUE reference is outside the selected directory");
+    return canonicalPath;
+  };
   const validateCueReferences = async (event: unknown, cuePath: string, document: CueDocument): Promise<void> => {
+    const { authorization } = authorizationFor(event);
     for (const file of document.files) {
-      const referencedPath = path.resolve(path.dirname(cuePath), file.path.replace(/[\\/]+/g, path.sep));
-      await resolveAuthorizedPath(event, referencedPath, "audio", true);
+      const usesWindowsNamespace = /^[\\/]{2}[?.][\\/]/.test(file.path);
+      const usesUncPath = /^[\\/]{2}/.test(file.path);
+      const rootUsesUncPath = /^[\\/]{2}/.test(authorization.canonicalRoot);
+      if (usesWindowsNamespace) throw new Error("CUE references cannot use Windows device paths");
+      if (usesUncPath && !rootUsesUncPath) throw new Error("UNC CUE reference is outside the selected directory");
+      const portableReference = process.platform === "win32" ? file.path : file.path.replace(/\\/g, path.sep);
+      const referencedPath = path.resolve(path.dirname(cuePath), portableReference);
+      if (file.type?.trim().toLocaleUpperCase("en-US") === "MP3" && path.extname(referencedPath).toLocaleLowerCase("en-US") !== ".mp3") {
+        throw new Error("CUE FILE type MP3 requires an .mp3 reference");
+      }
+      const canonicalReference = await resolveCueReferencePath(authorization, referencedPath);
+      if (file.type?.trim().toLocaleUpperCase("en-US") === "MP3" && path.extname(canonicalReference).toLocaleLowerCase("en-US") !== ".mp3") {
+        throw new Error("CUE FILE type MP3 requires the canonical target to use an .mp3 extension");
+      }
     }
   };
   const rankedCandidates = (candidates: MetadataCandidate[], context?: MetadataSearchContext): MetadataCandidate[] => {
@@ -310,11 +374,18 @@ export function registerIpcHandlers({
     return readCueFile(canonicalPath, sourceEncoding === undefined ? undefined : asCueEncoding(sourceEncoding));
   });
 
+  ipcMain.handle(ipcChannels.prepareCueSave, async (event, value) => {
+    const input = asPrepareCueSaveInput(value);
+    const { sender, canonicalPath } = await resolveAuthorizedPath(event, input.path, "cue", true);
+    await validateCueReferences(event, canonicalPath, cueDocumentForSave({ ...input, path: canonicalPath }));
+    return prepareCueSaveFile({ ...input, path: canonicalPath }, String(sender.id));
+  });
+
   ipcMain.handle(ipcChannels.saveCue, async (event, value) => {
     const input = asSaveCueInput(value);
     const { sender, canonicalPath } = await resolveAuthorizedPath(event, input.path, "cue", true);
-    await validateCueReferences(event, canonicalPath, input.document);
-    return saveCueFile({ ...input, path: canonicalPath, confirmationToken: `${sender.id}:${input.confirmationToken}` });
+    await validateCueReferences(event, canonicalPath, cueDocumentForSave({ ...input, path: canonicalPath }));
+    return saveCueFile({ ...input, path: canonicalPath }, String(sender.id));
   });
 
   ipcMain.handle(ipcChannels.previewCue, async (event, cuePath, rawText) => {

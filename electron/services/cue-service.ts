@@ -1,13 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   access,
-  copyFile,
+  link,
+  lstat,
   readFile,
+  realpath,
   rename,
+  stat,
   unlink,
   writeFile
 } from "node:fs/promises";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseCueFile } from "cue-parser";
@@ -18,6 +21,7 @@ import type {
   CueEncoding,
   CuePreservedLine,
   CueTrack,
+  PrepareCueSaveInput,
   SaveCueInput,
   SaveCueResult
 } from "../../shared/types";
@@ -25,9 +29,12 @@ import { decodeCueBytes, encodeCueText } from "./cue-encoding";
 
 type CueServiceDependencies = {
   access: typeof access;
-  copyFile: typeof copyFile;
+  link: typeof link;
+  lstat: typeof lstat;
   readFile: typeof readFile;
+  realpath: typeof realpath;
   rename: typeof rename;
+  stat: typeof stat;
   unlink: typeof unlink;
   writeFile: typeof writeFile;
 };
@@ -215,7 +222,10 @@ function parseWithCueParser(rawText: string, filePath: string): ICueSheet {
 function resolvedReferences(document: CueDocument, filePath: string): string[] {
   return document.files
     .filter((file) => file.path)
-    .map((file) => path.resolve(path.dirname(filePath), file.path.replace(/[\\/]+/g, path.sep)));
+    .map((file) => path.resolve(
+      path.dirname(filePath),
+      process.platform === "win32" ? file.path : file.path.replace(/\\/g, path.sep)
+    ));
 }
 
 export function parseCue(rawText: string, filePath: string): CueDocumentState {
@@ -623,17 +633,163 @@ async function pathExists(filePath: string, dependencies: CueServiceDependencies
   }
 }
 
+function cueBytesForSave(input: PrepareCueSaveInput): Buffer {
+  if (input.rawText && input.rawText !== input.document.sourceText) {
+    const rawState = parseCue(input.rawText, input.path);
+    if (rawState.parseError) throw new Error(rawState.parseError);
+    validateCueDocument(rawState.parsed);
+    return documentFingerprint(rawState.parsed) === documentFingerprint(input.document)
+      ? encodeCueText(input.rawText, input.encoding)
+      : serializeCue(input.document, input.encoding);
+  }
+  return serializeCue(input.document, input.encoding);
+}
+
+export function cueDocumentForSave(input: PrepareCueSaveInput): CueDocument {
+  const decoded = decodeCueBytes(cueBytesForSave(input), input.encoding);
+  const state = parseCue(decoded.text, input.path);
+  if (state.parseError) throw new Error(state.parseError);
+  validateCueDocument(state.parsed);
+  return state.parsed;
+}
+
+function normalizedSavePath(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
+}
+
+const MAX_TRACKED_CUE_SAVES = 512;
+
 export function createCueService(overrides: Partial<CueServiceDependencies> = {}) {
   const dependencies: CueServiceDependencies = {
     access,
-    copyFile,
+    link,
+    lstat,
     readFile,
+    realpath,
     rename,
+    stat,
     unlink,
     writeFile,
     ...overrides
   };
+  const confirmationSecret = randomBytes(32);
+  const issuedConfirmations = new Set<string>();
   const completedSaves = new Map<string, Promise<SaveCueResult>>();
+  const inFlightSaves = new Map<string, Promise<SaveCueResult>>();
+  const pathOperations = new Map<string, Promise<void>>();
+
+  async function assertCanonicalSavePath(filePath: string): Promise<void> {
+    const expectedPath = path.resolve(filePath);
+    try {
+      const canonicalPath = await dependencies.realpath(expectedPath);
+      if (normalizedSavePath(canonicalPath) !== normalizedSavePath(expectedPath)) {
+        throw new Error("CUE save path changed after canonical authorization");
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    try {
+      await dependencies.lstat(expectedPath);
+      throw new Error("CUE save path changed to an unresolved symbolic link");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const expectedParent = path.dirname(expectedPath);
+    const canonicalParent = await dependencies.realpath(expectedParent);
+    if (normalizedSavePath(canonicalParent) !== normalizedSavePath(expectedParent)) {
+      throw new Error("CUE save parent changed after canonical authorization");
+    }
+    if (!(await dependencies.stat(canonicalParent)).isDirectory()) {
+      throw new Error("CUE save parent must remain a directory");
+    }
+  }
+
+  const statFingerprint = (value: Stats): string => [
+    value.dev,
+    value.ino,
+    value.mode,
+    value.size,
+    value.mtimeMs,
+    value.birthtimeMs
+  ].join(":");
+
+  const statIdentity = (value: Stats): string => [value.dev, value.ino, value.mode].join(":");
+
+  async function fileRevision(filePath: string): Promise<Buffer> {
+    try {
+      const before = await dependencies.stat(filePath);
+      const contents = await dependencies.readFile(filePath);
+      const after = await dependencies.stat(filePath);
+      return createHash("sha256")
+        .update("present\0")
+        .update(statFingerprint(before))
+        .update("\0")
+        .update(contents)
+        .update("\0")
+        .update(statFingerprint(after))
+        .digest();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const canonicalParent = await dependencies.realpath(path.dirname(filePath));
+      const parentStats = await dependencies.stat(canonicalParent);
+      return createHash("sha256")
+        .update("missing\0")
+        .update(normalizedSavePath(canonicalParent))
+        .update("\0")
+        .update(statIdentity(parentStats))
+        .digest();
+    }
+  }
+
+  async function assertConfirmedRevision(filePath: string, expectedRevision: Buffer): Promise<void> {
+    const currentRevision = await fileRevision(filePath);
+    if (!timingSafeEqual(currentRevision, expectedRevision)) {
+      throw new Error("CUE file changed since confirmation; review it before saving again");
+    }
+  }
+
+  function confirmationMac(scope: string, filePath: string, bytes: Buffer, revision: Buffer, nonce: Buffer): Buffer {
+    const intent = createHash("sha256").update(bytes).digest();
+    return createHmac("sha256", confirmationSecret)
+      .update("music-id3-cue-save-v2\0")
+      .update(scope)
+      .update("\0")
+      .update(normalizedSavePath(filePath))
+      .update("\0")
+      .update(intent)
+      .update(revision)
+      .update(nonce)
+      .digest();
+  }
+
+  async function prepareCueSave(input: PrepareCueSaveInput, confirmationScope = "local-main"): Promise<string> {
+    if (confirmationScope.trim() === "") throw new Error("CUE save confirmation scope is unavailable");
+    await assertCanonicalSavePath(input.path);
+    const bytes = cueBytesForSave(input);
+    const revision = await fileRevision(input.path);
+    const nonce = randomBytes(16);
+    const mac = confirmationMac(confirmationScope, input.path, bytes, revision, nonce);
+    const token = `v2.${nonce.toString("base64url")}.${revision.toString("base64url")}.${mac.toString("base64url")}`;
+    if (issuedConfirmations.size >= MAX_TRACKED_CUE_SAVES) {
+      const oldest = issuedConfirmations.values().next().value as string | undefined;
+      if (oldest) issuedConfirmations.delete(oldest);
+    }
+    issuedConfirmations.add(token);
+    return token;
+  }
+
+  function confirmedRevision(input: SaveCueInput, confirmationScope: string, bytes: Buffer): Buffer | undefined {
+    const parts = input.confirmationToken.split(".");
+    if (parts.length !== 4 || parts[0] !== "v2") return undefined;
+    const nonce = Buffer.from(parts[1], "base64url");
+    const revision = Buffer.from(parts[2], "base64url");
+    const suppliedMac = Buffer.from(parts[3], "base64url");
+    if (nonce.length !== 16 || revision.length !== 32 || suppliedMac.length !== 32) return undefined;
+    const expectedMac = confirmationMac(confirmationScope, input.path, bytes, revision, nonce);
+    return timingSafeEqual(suppliedMac, expectedMac) ? revision : undefined;
+  }
 
   async function readCueFile(filePath: string, sourceEncoding?: CueEncoding): Promise<CueDocumentState> {
     const decoded = decodeCueBytes(await dependencies.readFile(filePath), sourceEncoding);
@@ -654,46 +810,69 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
     };
   }
 
-  async function saveCueFileOnce(input: SaveCueInput): Promise<SaveCueResult> {
+  async function saveCueFileOnce(input: SaveCueInput, bytes: Buffer, expectedRevision: Buffer): Promise<SaveCueResult> {
     const temporaryPath = `${input.path}.${randomUUID()}.tmp`;
     const temporaryPaths = new Set([temporaryPath]);
+    let retainedRecoveryPath: string | undefined;
     try {
-      let bytes: Buffer;
-      if (input.rawText && input.rawText !== input.document.sourceText) {
-        const rawState = parseCue(input.rawText, input.path);
-        if (rawState.parseError) {
-          throw new Error(rawState.parseError);
-        }
-        validateCueDocument(rawState.parsed);
-        bytes = documentFingerprint(rawState.parsed) === documentFingerprint(input.document)
-          ? encodeCueText(input.rawText, input.encoding)
-          : serializeCue(input.document, input.encoding);
-      } else {
-        bytes = serializeCue(input.document, input.encoding);
-      }
-
+      await assertCanonicalSavePath(input.path);
       const replacing = await pathExists(input.path, dependencies);
+      await assertCanonicalSavePath(input.path);
+      await assertConfirmedRevision(input.path, expectedRevision);
       await dependencies.writeFile(temporaryPath, bytes);
       let backupPath: string | undefined;
       let backupTemporaryPath: string | undefined;
       if (replacing) {
+        await assertCanonicalSavePath(input.path);
+        await assertConfirmedRevision(input.path, expectedRevision);
         backupPath = `${input.path}.bak`;
         backupTemporaryPath = `${backupPath}.${randomUUID()}.tmp`;
         temporaryPaths.add(backupTemporaryPath);
-        await dependencies.copyFile(input.path, backupTemporaryPath);
+        await dependencies.rename(input.path, backupTemporaryPath);
+        temporaryPaths.delete(backupTemporaryPath);
+        retainedRecoveryPath = backupTemporaryPath;
+        const displacedRevision = await fileRevision(backupTemporaryPath);
+        if (!timingSafeEqual(displacedRevision, expectedRevision)) {
+          try {
+            await dependencies.link(backupTemporaryPath, input.path);
+            await dependencies.unlink(backupTemporaryPath);
+            retainedRecoveryPath = undefined;
+          } catch (restoreError) {
+            const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError);
+            throw new Error(`CUE file changed during save; failed to restore it: ${restoreMessage}`);
+          }
+          throw new Error("CUE file changed since confirmation; review it before saving again");
+        }
+        await assertCanonicalSavePath(input.path);
+      } else {
+        await assertCanonicalSavePath(input.path);
+        await assertConfirmedRevision(input.path, expectedRevision);
       }
-      await dependencies.rename(temporaryPath, input.path);
-      temporaryPaths.delete(temporaryPath);
+      try {
+        await dependencies.link(temporaryPath, input.path);
+      } catch (publishError) {
+        if (backupTemporaryPath && (publishError as NodeJS.ErrnoException).code !== "EEXIST") {
+          try {
+            await dependencies.link(backupTemporaryPath, input.path);
+            await dependencies.unlink(backupTemporaryPath);
+            retainedRecoveryPath = undefined;
+          } catch (restoreError) {
+            const publishMessage = publishError instanceof Error ? publishError.message : String(publishError);
+            const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError);
+            throw new Error(`${publishMessage}; failed to restore original CUE: ${restoreMessage}`);
+          }
+        }
+        throw publishError;
+      }
       if (backupPath && backupTemporaryPath) {
         try {
           await dependencies.rename(backupTemporaryPath, backupPath);
-          temporaryPaths.delete(backupTemporaryPath);
+          retainedRecoveryPath = undefined;
         } catch (backupError) {
           try {
             await dependencies.rename(backupTemporaryPath, input.path);
-            temporaryPaths.delete(backupTemporaryPath);
+            retainedRecoveryPath = undefined;
           } catch (rollbackError) {
-            temporaryPaths.delete(backupTemporaryPath);
             const backupMessage = backupError instanceof Error ? backupError.message : String(backupError);
             const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
             throw new Error(`${backupMessage}; failed to restore original CUE: ${rollbackMessage}. Recovery copy retained at ${backupTemporaryPath}`);
@@ -701,6 +880,8 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
           throw backupError;
         }
       }
+      await dependencies.unlink(temporaryPath);
+      temporaryPaths.delete(temporaryPath);
       return { ok: true, path: input.path, ...(backupPath ? { backupPath } : {}) };
     } catch (error) {
       for (const filePath of temporaryPaths) {
@@ -710,30 +891,73 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
           // A temporary file may not have been created or may already have been renamed.
         }
       }
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        error: retainedRecoveryPath && !message.includes(retainedRecoveryPath)
+          ? `${message}. Original CUE recovery copy retained at ${retainedRecoveryPath}`
+          : message
+      };
     }
   }
 
-  function saveCueFile(input: SaveCueInput): Promise<SaveCueResult> {
+  function saveCueFile(input: SaveCueInput, confirmationScope = "local-main"): Promise<SaveCueResult> {
     if (typeof input.confirmationToken !== "string" || input.confirmationToken.trim() === "") {
       return Promise.resolve({ ok: false, error: "CUE save requires a confirmation token" });
     }
-    const key = `${path.resolve(input.path)}\0${input.confirmationToken}`;
-    const existing = completedSaves.get(key);
-    if (existing) return existing;
-    const operation = saveCueFileOnce(input);
-    completedSaves.set(key, operation);
-    if (completedSaves.size > 512) {
-      const oldest = completedSaves.keys().next().value as string | undefined;
-      if (oldest && oldest !== key) completedSaves.delete(oldest);
+    let bytes: Buffer;
+    try {
+      bytes = cueBytesForSave(input);
+    } catch (error) {
+      return Promise.resolve({ ok: false, error: error instanceof Error ? error.message : String(error) });
     }
+    const expectedRevision = confirmedRevision(input, confirmationScope, bytes);
+    if (!expectedRevision) return Promise.resolve({ ok: false, error: "Invalid CUE save confirmation" });
+    const savePathKey = normalizedSavePath(input.path);
+    const key = `${confirmationScope}\0${savePathKey}\0${input.confirmationToken}`;
+    const existing = inFlightSaves.get(key) ?? completedSaves.get(key);
+    if (existing) return existing;
+    if (!issuedConfirmations.has(input.confirmationToken)) {
+      return Promise.resolve({ ok: false, error: "CUE save confirmation is invalid, expired, or already used" });
+    }
+    if (inFlightSaves.size >= MAX_TRACKED_CUE_SAVES) {
+      return Promise.resolve({ ok: false, error: "Too many CUE saves are already in progress" });
+    }
+    issuedConfirmations.delete(input.confirmationToken);
+    const execute = async (): Promise<SaveCueResult> => {
+      try {
+        await assertCanonicalSavePath(input.path);
+        await assertConfirmedRevision(input.path, expectedRevision);
+        return saveCueFileOnce(input, bytes, expectedRevision);
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+    const prior = pathOperations.get(savePathKey);
+    const operation = prior ? prior.then(execute, execute) : execute();
+    const queued = operation.then(() => undefined, () => undefined);
+    pathOperations.set(savePathKey, queued);
+    void queued.then(() => {
+      if (pathOperations.get(savePathKey) === queued) pathOperations.delete(savePathKey);
+    });
+    inFlightSaves.set(key, operation);
+    const rememberCompletion = () => {
+      if (inFlightSaves.get(key) === operation) inFlightSaves.delete(key);
+      completedSaves.set(key, operation);
+      if (completedSaves.size > MAX_TRACKED_CUE_SAVES) {
+        const oldest = completedSaves.keys().next().value as string | undefined;
+        if (oldest) completedSaves.delete(oldest);
+      }
+    };
+    void operation.then(rememberCompletion, rememberCompletion);
     return operation;
   }
 
-  return { readCue: readCueFile, saveCue: saveCueFile };
+  return { readCue: readCueFile, prepareCueSave, saveCue: saveCueFile };
 }
 
 const defaultCueService = createCueService();
 
 export const readCue = defaultCueService.readCue;
+export const prepareCueSave = defaultCueService.prepareCueSave;
 export const saveCue = defaultCueService.saveCue;

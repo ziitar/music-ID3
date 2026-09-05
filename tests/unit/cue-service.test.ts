@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,7 @@ import {
   readCue,
   serializeCue
 } from "../../electron/services/cue-service";
-import type { CueDocument } from "../../shared/types";
+import type { CueDocument, SaveCueInput, SaveCueResult } from "../../shared/types";
 
 const temporaryDirectories: string[] = [];
 
@@ -16,6 +16,20 @@ async function createTempDir(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "music-id3-cue-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function savePreparedCue(
+  service: ReturnType<typeof createCueService>,
+  input: SaveCueInput,
+  scope = "local-main"
+): Promise<SaveCueResult> {
+  const { confirmationToken: _rendererToken, ...draft } = input;
+  try {
+    const confirmationToken = await service.prepareCueSave(draft, scope);
+    return service.saveCue({ ...draft, confirmationToken }, scope);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 afterEach(async () => {
@@ -183,7 +197,7 @@ describe("CUE service", () => {
       "    INDEX 01 00:00:00"
     ].join("\n");
 
-    const result = await createCueService().saveCue({
+    const result = await savePreparedCue(createCueService(), {
       path: cuePath,
       document,
       rawText: differentRawText,
@@ -537,7 +551,7 @@ describe("CUE service", () => {
     };
     await writeFile(cuePath, original);
 
-    const result = await createCueService().saveCue({
+    const result = await savePreparedCue(createCueService(), {
       path: cuePath,
       document: replacement,
       rawText: "",
@@ -560,7 +574,7 @@ describe("CUE service", () => {
       unknownLines: []
     };
 
-    const result = await createCueService().saveCue({ path: cuePath, document, rawText: "", encoding: "utf8", confirmationToken: "new-cue" });
+    const result = await savePreparedCue(createCueService(), { path: cuePath, document, rawText: "", encoding: "utf8", confirmationToken: "new-cue" });
 
     expect(result).toEqual({ ok: true, path: cuePath });
     await expect(readFile(`${cuePath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
@@ -582,7 +596,7 @@ describe("CUE service", () => {
       rename: async () => { throw new Error("replace denied"); }
     });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-denied" });
+    const result = await savePreparedCue(service, { path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-denied" });
 
     expect(result).toEqual({ ok: false, error: "replace denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);
@@ -607,7 +621,7 @@ describe("CUE service", () => {
     await writeFile(backupPath, priorBackup);
     const service = createCueService({ rename: async () => { throw new Error("replace denied"); } });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-with-backup-denied" });
+    const result = await savePreparedCue(service, { path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "replacement-with-backup-denied" });
 
     expect(result).toEqual({ ok: false, error: "replace denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);
@@ -629,7 +643,7 @@ describe("CUE service", () => {
     await writeFile(cuePath, original);
     await writeFile(`${cuePath}.bak`, 'TITLE "Older backup"');
 
-    const result = await createCueService().saveCue({
+    const result = await savePreparedCue(createCueService(), {
       path: cuePath,
       document: replacement,
       rawText: "",
@@ -654,14 +668,336 @@ describe("CUE service", () => {
     };
     await writeFile(cuePath, original);
     const service = createCueService();
-    const input = { path: cuePath, document: replacement, rawText: "", encoding: "utf8" as const, confirmationToken: "same-confirmation" };
+    const draft = { path: cuePath, document: replacement, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+    const input = { ...draft, confirmationToken };
 
-    const first = await service.saveCue(input);
-    const duplicate = await service.saveCue(input);
+    const firstOperation = service.saveCue(input, "renderer-1");
+    const duplicateOperation = service.saveCue(input, "renderer-1");
+    const [first, duplicate] = await Promise.all([firstOperation, duplicateOperation]);
 
+    expect(duplicateOperation).toBe(firstOperation);
     expect(first).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
     expect(duplicate).toEqual(first);
     expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("keeps an in-flight duplicate idempotent while completed-save cache entries are evicted", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "slow.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    let releaseRename!: () => void;
+    let markRenameStarted!: () => void;
+    const renameReleased = new Promise<void>((resolve) => { releaseRename = resolve; });
+    const renameStarted = new Promise<void>((resolve) => { markRenameStarted = resolve; });
+    let heldRename = false;
+    const holdPublish = async (source: Parameters<typeof rename>[0], destination: Parameters<typeof rename>[1], publish: typeof rename | typeof link) => {
+      if (!heldRename && destination.toString() === cuePath) {
+        heldRename = true;
+        markRenameStarted();
+        await renameReleased;
+      }
+      await publish(source, destination);
+    };
+    const service = createCueService({
+      rename: (source, destination) => holdPublish(source, destination, rename),
+      link: (source, destination) => holdPublish(source, destination, link)
+    });
+    const draft = { path: cuePath, document: replacement, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+    const input = { ...draft, confirmationToken };
+
+    const firstOperation = service.saveCue(input, "renderer-1");
+    await renameStarted;
+    for (let index = 0; index < 512; index += 1) {
+      const unrelatedDraft = { ...draft, path: path.join(directory, `completed-${index}.cue`) };
+      const unrelatedToken = await service.prepareCueSave(unrelatedDraft, "renderer-1");
+      await service.saveCue({ ...unrelatedDraft, confirmationToken: unrelatedToken }, "renderer-1");
+    }
+    const duplicateOperation = service.saveCue(input, "renderer-1");
+    const sameOperation = duplicateOperation === firstOperation;
+    releaseRename();
+    const [first, duplicate] = await Promise.all([firstOperation, duplicateOperation]);
+
+    expect(sameOperation).toBe(true);
+    expect(first).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
+    expect(duplicate).toEqual(first);
+    expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("allows only one distinct save intent prepared from the same CUE revision", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "concurrent.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const baseDocument: CueDocument = {
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    const service = createCueService();
+    const firstDraft = { path: cuePath, document: { ...baseDocument, title: "First" }, rawText: "", encoding: "utf8" as const };
+    const secondDraft = { path: cuePath, document: { ...baseDocument, title: "Second" }, rawText: "", encoding: "utf8" as const };
+    const [firstToken, secondToken] = await Promise.all([
+      service.prepareCueSave(firstDraft, "renderer-1"),
+      service.prepareCueSave(secondDraft, "renderer-1")
+    ]);
+
+    expect(firstToken).not.toBe(secondToken);
+    const firstOperation = service.saveCue({ ...firstDraft, confirmationToken: firstToken }, "renderer-1");
+    const secondOperation = service.saveCue({ ...secondDraft, confirmationToken: secondToken }, "renderer-1");
+    const [first, second] = await Promise.all([firstOperation, secondOperation]);
+
+    expect(first).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
+    expect(second).toEqual({ ok: false, error: expect.stringMatching(/changed since confirmation/i) });
+    expect(await readFile(cuePath, "utf8")).toContain('TITLE "First"');
+    expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+  });
+
+  it("does not let bounded-cache eviction replay replacement or new-file confirmation tokens", async () => {
+    const directory = await createTempDir();
+    const existingPath = path.join(directory, "existing.cue");
+    const newPath = path.join(directory, "new.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(existingPath, original);
+    const service = createCueService();
+    const existingDraft = { path: existingPath, document: replacement, rawText: "", encoding: "utf8" as const };
+    const newDraft = { ...existingDraft, path: newPath };
+    const existingInput = { ...existingDraft, confirmationToken: await service.prepareCueSave(existingDraft, "renderer-1") };
+    const newInput = { ...newDraft, confirmationToken: await service.prepareCueSave(newDraft, "renderer-1") };
+
+    const firstExisting = await service.saveCue(existingInput, "renderer-1");
+    const firstNew = await service.saveCue(newInput, "renderer-1");
+    for (let index = 0; index < 512; index += 1) {
+      const unrelatedDraft = { ...existingDraft, path: path.join(directory, `unrelated-${index}.cue`) };
+      const confirmationToken = await service.prepareCueSave(unrelatedDraft, "renderer-1");
+      await service.saveCue({ ...unrelatedDraft, confirmationToken }, "renderer-1");
+    }
+
+    const replayedExisting = await service.saveCue(existingInput, "renderer-1");
+    const replayedNew = await service.saveCue(newInput, "renderer-1");
+
+    expect(firstExisting).toEqual({ ok: true, path: existingPath, backupPath: `${existingPath}.bak` });
+    expect(firstNew).toEqual({ ok: true, path: newPath });
+    expect(replayedExisting).toEqual({ ok: false, error: expect.stringMatching(/invalid|expired|used/i) });
+    expect(replayedNew).toEqual({ ok: false, error: expect.stringMatching(/invalid|expired|used/i) });
+    expect(await readFile(`${existingPath}.bak`, "utf8")).toBe(original);
+    await expect(readFile(`${newPath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not retry failed replacement or creation tokens after completed-save cache eviction", async () => {
+    const directory = await createTempDir();
+    const existingPath = path.join(directory, "failed-existing.cue");
+    const newPath = path.join(directory, "failed-new.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(existingPath, original);
+    const failedDestinations = new Set<string>();
+    const service = createCueService({
+      link: async (source, destination) => {
+        const destinationPath = destination.toString();
+        if ((destinationPath === existingPath || destinationPath === newPath) && !failedDestinations.has(destinationPath)) {
+          failedDestinations.add(destinationPath);
+          throw new Error("transient replace failure");
+        }
+        await link(source, destination);
+      }
+    });
+    const existingDraft = { path: existingPath, document: replacement, rawText: "", encoding: "utf8" as const };
+    const newDraft = { ...existingDraft, path: newPath };
+    const existingInput = { ...existingDraft, confirmationToken: await service.prepareCueSave(existingDraft, "renderer-1") };
+    const newInput = { ...newDraft, confirmationToken: await service.prepareCueSave(newDraft, "renderer-1") };
+
+    const firstExisting = await service.saveCue(existingInput, "renderer-1");
+    const firstNew = await service.saveCue(newInput, "renderer-1");
+    for (let index = 0; index < 512; index += 1) {
+      const unrelatedDraft = { ...existingDraft, path: path.join(directory, `after-failure-${index}.cue`) };
+      const confirmationToken = await service.prepareCueSave(unrelatedDraft, "renderer-1");
+      await service.saveCue({ ...unrelatedDraft, confirmationToken }, "renderer-1");
+    }
+    const replayedExisting = await service.saveCue(existingInput, "renderer-1");
+    const replayedNew = await service.saveCue(newInput, "renderer-1");
+
+    expect(firstExisting).toEqual({ ok: false, error: "transient replace failure" });
+    expect(firstNew).toEqual({ ok: false, error: "transient replace failure" });
+    expect(replayedExisting).toEqual({ ok: false, error: expect.stringMatching(/invalid|expired|used/i) });
+    expect(replayedNew).toEqual({ ok: false, error: expect.stringMatching(/invalid|expired|used/i) });
+    expect(await readFile(existingPath, "utf8")).toBe(original);
+    await expect(readFile(`${existingPath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(newPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(`${newPath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("bounds unused confirmations by expiring the oldest without invalidating the newest", async () => {
+    const directory = await createTempDir();
+    const document: CueDocument = {
+      title: "Prepared",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    const service = createCueService();
+    const oldestDraft = { path: path.join(directory, "oldest.cue"), document, rawText: "", encoding: "utf8" as const };
+    const oldestToken = await service.prepareCueSave(oldestDraft, "renderer-1");
+    let newestDraft = oldestDraft;
+    let newestToken = oldestToken;
+    for (let index = 0; index < 512; index += 1) {
+      newestDraft = { ...oldestDraft, path: path.join(directory, `pending-${index}.cue`) };
+      newestToken = await service.prepareCueSave(newestDraft, "renderer-1");
+    }
+
+    await expect(service.saveCue({ ...oldestDraft, confirmationToken: oldestToken }, "renderer-1")).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/invalid|expired|used/i)
+    });
+    await expect(readFile(oldestDraft.path)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(service.saveCue({ ...newestDraft, confirmationToken: newestToken }, "renderer-1")).resolves.toEqual({
+      ok: true,
+      path: newestDraft.path
+    });
+  });
+
+  it("binds a prepared confirmation token to its renderer, path, and intended CUE bytes", async () => {
+    const directory = await createTempDir();
+    const firstPath = path.join(directory, "first.cue");
+    const secondPath = path.join(directory, "second.cue");
+    const document: CueDocument = {
+      title: "Prepared",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    const service = createCueService();
+    const draft = { path: firstPath, document, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+
+    await expect(service.saveCue({ ...draft, path: secondPath, confirmationToken }, "renderer-1")).resolves.toEqual({ ok: false, error: expect.stringMatching(/invalid.*confirmation/i) });
+    await expect(service.saveCue({ ...draft, confirmationToken }, "renderer-2")).resolves.toEqual({ ok: false, error: expect.stringMatching(/invalid.*confirmation/i) });
+    await expect(service.saveCue({ ...draft, document: { ...document, title: "Altered" }, confirmationToken }, "renderer-1")).resolves.toEqual({ ok: false, error: expect.stringMatching(/invalid.*confirmation/i) });
+    await expect(service.saveCue({ ...draft, confirmationToken }, "renderer-1")).resolves.toEqual({ ok: true, path: firstPath });
+    await expect(readFile(secondPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a prepared save when the existing CUE revision changes before confirmation", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "changed.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const external = 'TITLE "External"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const document: CueDocument = {
+      title: "Prepared",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    const service = createCueService();
+    const draft = { path: cuePath, document, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+    await writeFile(cuePath, external);
+
+    await expect(service.saveCue({ ...draft, confirmationToken }, "renderer-1")).resolves.toEqual({ ok: false, error: expect.stringMatching(/changed since confirmation/i) });
+    expect(await readFile(cuePath, "utf8")).toBe(external);
+    await expect(readFile(`${cuePath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not overwrite a new CUE created at the final publication boundary", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "created-concurrently.cue");
+    const concurrentContents = 'TITLE "Created elsewhere"';
+    const document: CueDocument = {
+      title: "Prepared",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    let raced = false;
+    const race = async (source: Parameters<typeof rename>[0], destination: Parameters<typeof rename>[1], publish: typeof rename | typeof link) => {
+      if (!raced && destination.toString() === cuePath) {
+        raced = true;
+        await writeFile(cuePath, concurrentContents);
+      }
+      await publish(source, destination);
+    };
+    const racingRename: typeof rename = (source, destination) => race(source, destination, rename);
+    const racingLink: typeof link = (source, destination) => race(source, destination, link);
+    const service = createCueService({ rename: racingRename, link: racingLink });
+    const draft = { path: cuePath, document, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+
+    const result = await service.saveCue({ ...draft, confirmationToken }, "renderer-1");
+
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/exist|changed|publish/i) });
+    expect(await readFile(cuePath, "utf8")).toBe(concurrentContents);
+    expect(await readdir(directory)).toEqual(["created-concurrently.cue"]);
+  });
+
+  it("preserves a CUE changed at the final publication boundary and retains the confirmed original", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "changed-concurrently.cue");
+    const backupPath = `${cuePath}.bak`;
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const priorBackup = 'TITLE "Prior backup"';
+    const concurrentContents = 'TITLE "Changed elsewhere"';
+    const document: CueDocument = {
+      title: "Prepared",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    await writeFile(backupPath, priorBackup);
+    let raced = false;
+    const race = async (source: Parameters<typeof rename>[0], destination: Parameters<typeof rename>[1], publish: typeof rename | typeof link) => {
+      if (!raced && destination.toString() === cuePath) {
+        raced = true;
+        await writeFile(cuePath, concurrentContents);
+      }
+      await publish(source, destination);
+    };
+    const racingRename: typeof rename = (source, destination) => race(source, destination, rename);
+    const racingLink: typeof link = (source, destination) => race(source, destination, link);
+    const service = createCueService({ rename: racingRename, link: racingLink });
+    const draft = { path: cuePath, document, rawText: "", encoding: "utf8" as const };
+    const confirmationToken = await service.prepareCueSave(draft, "renderer-1");
+
+    const result = await service.saveCue({ ...draft, confirmationToken }, "renderer-1");
+    const otherContents = await Promise.all(
+      (await readdir(directory))
+        .filter((name) => ![path.basename(cuePath), path.basename(backupPath)].includes(name))
+        .map((name) => readFile(path.join(directory, name), "utf8"))
+    );
+
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/recovery copy retained/i) });
+    expect(await readFile(cuePath, "utf8")).toBe(concurrentContents);
+    expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
+    expect(otherContents).toContain(original);
   });
 
   it("retains and surfaces the only original recovery copy when backup publication and rollback both fail", async () => {
@@ -687,7 +1023,7 @@ describe("CUE service", () => {
       }
     });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "recovery-confirmation" });
+    const result = await savePreparedCue(service, { path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "recovery-confirmation" });
     const files = await readdir(directory);
     const contents = await Promise.all(files.map((name) => readFile(path.join(directory, name), "utf8")));
 
@@ -720,7 +1056,7 @@ describe("CUE service", () => {
       }
     });
 
-    const result = await service.saveCue({ path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "backup-publication-denied" });
+    const result = await savePreparedCue(service, { path: cuePath, document: replacement, rawText: "", encoding: "utf8", confirmationToken: "backup-publication-denied" });
 
     expect(result).toEqual({ ok: false, error: "backup publish denied" });
     expect(await readFile(cuePath, "utf8")).toBe(original);

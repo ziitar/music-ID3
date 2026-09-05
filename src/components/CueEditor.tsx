@@ -1,9 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { CueDocument, CueEncoding, LibraryItem, SaveCueInput } from "../../shared/types";
+import type { CueDocument, CueEncoding, LibraryItem, PrepareCueSaveInput, SaveCueInput } from "../../shared/types";
 import { editorStore, useEditorStore, type EditorOwnership } from "../stores/editor-store";
 import { libraryStore } from "../stores/library-store";
-
-let cueConfirmationSequence = 0;
 
 type CueSaveConfirmation = {
   ownership: EditorOwnership;
@@ -86,21 +84,27 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
 
   const updateTrack = (index: number, patch: Partial<CueDocument["tracks"][number]>) => setDocument((current) => ({ ...current, tracks: current.tracks.map((track, position) => position === index ? { ...track, ...patch } : track) }));
   const isConfirmationCurrent = (target: CueSaveConfirmation) => target.targetPath === item.path && target.mode === mode && target.raw === raw && target.document === document && target.encoding === encoding && editorStore.isCurrentOwnership(target.ownership);
-  const openConfirmation = () => {
+  const openConfirmation = async () => {
     const ownership = editorStore.captureOwnership();
     if (!ownership) return;
-    const confirmationToken = `cue-confirmation-${ownership.generation}-${++cueConfirmationSequence}`;
-    setConfirm({
-      ownership,
-      targetPath: item.path,
-      input: { path: item.path, rawText: mode === "raw" ? raw : "", encoding, document, confirmationToken },
-      mode,
-      raw,
-      document,
-      encoding,
-      libraryGeneration: libraryStore.getGeneration(),
-      generated: ownership.path !== item.path
-    });
+    const input: PrepareCueSaveInput = { path: item.path, rawText: mode === "raw" ? raw : "", encoding, document };
+    try {
+      const confirmationToken = await window.musicId3.prepareCueSave(input);
+      if (!mounted.current || !editorStore.isCurrentOwnership(ownership)) return;
+      setConfirm({
+        ownership,
+        targetPath: item.path,
+        input: { ...input, confirmationToken },
+        mode,
+        raw,
+        document,
+        encoding,
+        libraryGeneration: libraryStore.getGeneration(),
+        generated: ownership.path !== item.path
+      });
+    } catch {
+      if (mounted.current && editorStore.isCurrentOwnership(ownership)) editorStore.setError("Unable to prepare CUE save");
+    }
   };
   const save = async (target: CueSaveConfirmation) => {
     if (!isConfirmationCurrent(target)) { if (mounted.current) setConfirm(undefined); return; }
@@ -141,7 +145,7 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
       {document.files.map((file, index) => <label key={index}>FILE {index + 1}<input aria-label={`cue file ${index + 1}`} value={file.path} onChange={(event) => setDocument({ ...document, files: document.files.map((entry, position) => position === index ? { ...entry, path: event.target.value } : entry) })} /></label>)}
       {document.tracks.map((track, index) => <fieldset key={track.number}><legend>Track {track.number}</legend><label>Title<input aria-label={`track ${track.number} title`} value={track.title ?? ""} onChange={(event) => updateTrack(index, { title: event.target.value })} /></label><label>Performer<input aria-label={`track ${track.number} performer`} value={track.performer ?? ""} onChange={(event) => updateTrack(index, { performer: event.target.value })} /></label><label>INDEX 01<input aria-label={`track ${track.number} index`} value={track.indexes.find((entry) => entry.number === 1)?.time ?? ""} onChange={(event) => updateTrack(index, { indexes: track.indexes.map((entry) => entry.number === 1 ? { ...entry, time: event.target.value } : entry) })} /></label><label>Pregap<input aria-label={`track ${track.number} pregap`} value={track.pregap ?? ""} onChange={(event) => updateTrack(index, { pregap: event.target.value })} /></label><label>Postgap<input aria-label={`track ${track.number} postgap`} value={track.postgap ?? ""} onChange={(event) => updateTrack(index, { postgap: event.target.value })} /></label></fieldset>)}
     </div>}
-    <button disabled={Boolean(validationError) || (mode === "raw" && validatedRaw !== raw)} onClick={openConfirmation}>Save CUE</button>
+    <button disabled={Boolean(validationError) || (mode === "raw" && validatedRaw !== raw)} onClick={() => void openConfirmation()}>Save CUE</button>
     {confirmationCurrent && confirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body">
       {confirm.generated ? <p>This creates a new CUE file.</p> : <p>Saving creates a .bak backup.</p>}
       {provenance?.inferred && provenance.confidence === "low" && <p className="warning-text">Review this inferred, low-confidence candidate before saving.</p>}

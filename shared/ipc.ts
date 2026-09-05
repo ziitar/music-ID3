@@ -10,6 +10,7 @@ import type {
   MetadataPatch,
   MetadataSearchContext,
   MetadataSource,
+  PrepareCueSaveInput,
   SaveCueInput,
   SaveCueResult,
   ScanProgress,
@@ -25,6 +26,7 @@ export const ipcChannels = {
   readAudio: "music-id3:read-audio",
   writeAudio: "music-id3:write-audio",
   readCue: "music-id3:read-cue",
+  prepareCueSave: "music-id3:prepare-cue-save",
   saveCue: "music-id3:save-cue",
   previewCue: "music-id3:preview-cue",
   buildCandidateCue: "music-id3:build-candidate-cue",
@@ -53,6 +55,7 @@ export type MusicId3Api = {
   readAudio(path: string): Promise<AudioMetadata>;
   writeAudio(path: string, patch: MetadataPatch): Promise<WriteResult>;
   readCue(path: string, sourceEncoding?: CueDocumentState["encoding"]): Promise<CueDocumentState>;
+  prepareCueSave(input: PrepareCueSaveInput): Promise<string>;
   saveCue(input: SaveCueInput): Promise<SaveCueResult>;
   previewCue(path: string, rawText: string): Promise<CueDocumentState>;
   buildCandidateCue(input: BuildCandidateCueInput): Promise<CueDocument>;

@@ -95,11 +95,14 @@ export type CueDocumentState = {
   parseError?: string;
 };
 
-export type SaveCueInput = {
+export type PrepareCueSaveInput = {
   path: string;
   document: CueDocument;
   rawText: string;
   encoding: CueEncoding;
+};
+
+export type SaveCueInput = PrepareCueSaveInput & {
   confirmationToken: string;
 };
 

@@ -37,6 +37,7 @@ describe("IPC contracts", () => {
       readAudio: "music-id3:read-audio",
       writeAudio: "music-id3:write-audio",
       readCue: "music-id3:read-cue",
+      prepareCueSave: "music-id3:prepare-cue-save",
       saveCue: "music-id3:save-cue",
       previewCue: "music-id3:preview-cue",
       buildCandidateCue: "music-id3:build-candidate-cue",
@@ -79,6 +80,7 @@ describe("IPC contracts", () => {
       ipcChannels.readAudio,
       ipcChannels.writeAudio,
       ipcChannels.readCue,
+      ipcChannels.prepareCueSave,
       ipcChannels.saveCue,
       ipcChannels.previewCue,
       ipcChannels.buildCandidateCue,
@@ -242,15 +244,17 @@ describe("IPC contracts", () => {
     const event = rendererEvent();
     await approveRoot(handlers, event);
     const read = await handlers.get(ipcChannels.readCue)?.(event, cuePath);
-    const saved = await handlers.get(ipcChannels.saveCue)?.(event, {
+    const draft = {
       path: cuePath,
       document: replacement,
       rawText: "",
-      encoding: "utf8",
-      confirmationToken: "ipc-save"
-    });
+      encoding: "utf8"
+    };
+    const confirmationToken = await handlers.get(ipcChannels.prepareCueSave)?.(event, draft);
+    const saved = await handlers.get(ipcChannels.saveCue)?.(event, { ...draft, confirmationToken });
 
     expect(read).toMatchObject({ path: cuePath, parsed: { title: "Before" } });
+    expect(confirmationToken).toEqual(expect.any(String));
     expect(saved).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
   });
 
@@ -281,14 +285,13 @@ describe("IPC contracts", () => {
 
     const event = rendererEvent();
     await approveRoot(handlers, event);
-    const result = await handlers.get(ipcChannels.saveCue)?.(event, {
+    const draft = {
       path: cuePath,
       document,
       rawText: document.sourceText,
-      encoding: "utf8",
-      confirmationToken: "forged-ipc-save"
-    });
+      encoding: "utf8"
+    };
 
-    expect(result).toEqual({ ok: false, error: expect.any(String) });
+    await expect(handlers.get(ipcChannels.prepareCueSave)?.(event, draft)).rejects.toThrow();
   });
 });
