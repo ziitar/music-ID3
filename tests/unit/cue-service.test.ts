@@ -1,4 +1,4 @@
-import { link, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -580,6 +580,73 @@ describe("CUE service", () => {
     await expect(readFile(`${cuePath}.bak`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("keeps a new-file save successful when redundant hard-link cleanup fails", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "new-cleanup-failure.cue");
+    const document: CueDocument = {
+      title: "Committed",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    const service = createCueService({
+      unlink: async (target) => {
+        if (target.toString().startsWith(`${cuePath}.`) && target.toString().endsWith(".tmp")) {
+          throw new Error("temporary cleanup denied");
+        }
+        await unlink(target);
+      }
+    });
+
+    const result = await savePreparedCue(service, {
+      path: cuePath,
+      document,
+      rawText: "",
+      encoding: "utf8",
+      confirmationToken: "new-cleanup-failure"
+    });
+
+    expect(result).toEqual({ ok: true, path: cuePath });
+    expect(await readFile(cuePath)).toEqual(serializeCue(document, "utf8"));
+    expect((await readdir(directory)).some((name) => name.endsWith(".tmp"))).toBe(true);
+  });
+
+  it("keeps a replacement successful when redundant hard-link cleanup fails", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "replace-cleanup-failure.cue");
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const document: CueDocument = {
+      title: "Committed",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    const service = createCueService({
+      unlink: async (target) => {
+        if (target.toString().startsWith(`${cuePath}.`) && target.toString().endsWith(".tmp")) {
+          throw new Error("temporary cleanup denied");
+        }
+        await unlink(target);
+      }
+    });
+
+    const result = await savePreparedCue(service, {
+      path: cuePath,
+      document,
+      rawText: "",
+      encoding: "utf8",
+      confirmationToken: "replace-cleanup-failure"
+    });
+
+    expect(result).toEqual({ ok: true, path: cuePath, backupPath: `${cuePath}.bak` });
+    expect(await readFile(cuePath)).toEqual(serializeCue(document, "utf8"));
+    expect(await readFile(`${cuePath}.bak`, "utf8")).toBe(original);
+    expect((await readdir(directory)).some((name) => name.endsWith(".tmp"))).toBe(true);
+  });
+
   it("leaves the original intact and no backup when replacement fails without an existing backup", async () => {
     const directory = await createTempDir();
     const cuePath = path.join(directory, "album.cue");
@@ -1018,8 +1085,11 @@ describe("CUE service", () => {
     const service = createCueService({
       rename: async (source, destination) => {
         if (destination === backupPath) throw new Error("backup publish denied");
-        if (destination === cuePath && source.includes(".bak.")) throw new Error("rollback denied");
         await rename(source, destination);
+      },
+      link: async (source, destination) => {
+        if (destination === cuePath && source.includes(".bak.")) throw new Error("rollback denied");
+        await link(source, destination);
       }
     });
 
@@ -1062,6 +1132,51 @@ describe("CUE service", () => {
     expect(await readFile(cuePath, "utf8")).toBe(original);
     expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
     expect((await readdir(directory)).sort()).toEqual(["album.cue", "album.cue.bak"]);
+  });
+
+  it("preserves a destination changed during backup-publication failure and retains the confirmed original", async () => {
+    const directory = await createTempDir();
+    const cuePath = path.join(directory, "concurrent-backup-failure.cue");
+    const backupPath = `${cuePath}.bak`;
+    const original = 'TITLE "Original"\nFILE "disc.flac" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00';
+    const priorBackup = 'TITLE "Prior backup"';
+    const concurrent = 'TITLE "Concurrent"';
+    const replacement: CueDocument = {
+      title: "Replacement",
+      remarks: [],
+      files: [{ path: "disc.flac", type: "WAVE" }],
+      tracks: [{ number: 1, fileIndex: 0, indexes: [{ number: 1, time: "00:00:00" }] }],
+      unknownLines: []
+    };
+    await writeFile(cuePath, original);
+    await writeFile(backupPath, priorBackup);
+    const service = createCueService({
+      rename: async (source, destination) => {
+        if (destination.toString() === backupPath) {
+          await writeFile(cuePath, concurrent);
+          throw new Error("backup publish denied");
+        }
+        await rename(source, destination);
+      }
+    });
+
+    const result = await savePreparedCue(service, {
+      path: cuePath,
+      document: replacement,
+      rawText: "",
+      encoding: "utf8",
+      confirmationToken: "concurrent-backup-failure"
+    });
+    const retainedContents = await Promise.all(
+      (await readdir(directory))
+        .filter((name) => ![path.basename(cuePath), path.basename(backupPath)].includes(name))
+        .map((name) => readFile(path.join(directory, name), "utf8"))
+    );
+
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/destination changed.*recovery copy retained/i) });
+    expect(await readFile(cuePath, "utf8")).toBe(concurrent);
+    expect(await readFile(backupPath, "utf8")).toBe(priorBackup);
+    expect(retainedContents).toContain(original);
   });
 
   it("rejects embedded double quotes in structured values instead of changing their text", () => {

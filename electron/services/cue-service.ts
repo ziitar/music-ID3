@@ -869,19 +869,63 @@ export function createCueService(overrides: Partial<CueServiceDependencies> = {}
           await dependencies.rename(backupTemporaryPath, backupPath);
           retainedRecoveryPath = undefined;
         } catch (backupError) {
+          const backupMessage = backupError instanceof Error ? backupError.message : String(backupError);
+          const rollbackTemporaryPath = `${input.path}.${randomUUID()}.rollback.tmp`;
+          let destinationChanged = false;
+          let quarantinedDestination = false;
+          let rollbackError: unknown;
           try {
-            await dependencies.rename(backupTemporaryPath, input.path);
-            retainedRecoveryPath = undefined;
-          } catch (rollbackError) {
-            const backupMessage = backupError instanceof Error ? backupError.message : String(backupError);
-            const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-            throw new Error(`${backupMessage}; failed to restore original CUE: ${rollbackMessage}. Recovery copy retained at ${backupTemporaryPath}`);
+            await dependencies.rename(input.path, rollbackTemporaryPath);
+            quarantinedDestination = true;
+            destinationChanged = !(await dependencies.readFile(rollbackTemporaryPath)).equals(bytes);
+            if (destinationChanged) {
+              await dependencies.link(rollbackTemporaryPath, input.path);
+            } else {
+              await dependencies.link(backupTemporaryPath, input.path);
+              retainedRecoveryPath = undefined;
+              try {
+                await dependencies.unlink(backupTemporaryPath);
+              } catch {
+                // The original is already restored at the destination.
+              }
+            }
+            quarantinedDestination = false;
+            try {
+              await dependencies.unlink(rollbackTemporaryPath);
+            } catch {
+              // The quarantined entry is redundant after its safe restoration.
+            }
+          } catch (error) {
+            rollbackError = error;
+            if (quarantinedDestination) {
+              try {
+                await dependencies.link(rollbackTemporaryPath, input.path);
+                quarantinedDestination = false;
+                try {
+                  await dependencies.unlink(rollbackTemporaryPath);
+                } catch {
+                  // The destination is restored; a redundant hard link may remain.
+                }
+              } catch {
+                // Preserve the quarantined entry when the destination is occupied or unavailable.
+              }
+            }
           }
+          if (rollbackError) {
+            const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+            const quarantineMessage = quarantinedDestination ? ` Current destination retained at ${rollbackTemporaryPath}.` : "";
+            throw new Error(`${backupMessage}; safe rollback failed: ${rollbackMessage}.${quarantineMessage}`);
+          }
+          if (destinationChanged) throw new Error(`${backupMessage}; destination changed during backup publication`);
           throw backupError;
         }
       }
-      await dependencies.unlink(temporaryPath);
       temporaryPaths.delete(temporaryPath);
+      try {
+        await dependencies.unlink(temporaryPath);
+      } catch {
+        // Destination and backup publication are already committed; this hard link is redundant.
+      }
       return { ok: true, path: input.path, ...(backupPath ? { backupPath } : {}) };
     } catch (error) {
       for (const filePath of temporaryPaths) {
