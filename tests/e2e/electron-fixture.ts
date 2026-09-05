@@ -117,6 +117,9 @@ async function launchApplication(fixtureRoot: string, providerOrigin: string, us
   });
   const page = await electronApp.firstWindow();
   await page.waitForLoadState("domcontentloaded");
+  await page.evaluate(() => localStorage.setItem("music-id3.locale", "en-US"));
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
   return { electronApp, page };
 }
 

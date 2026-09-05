@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CueDocument, CueEncoding, LibraryItem, PrepareCueSaveInput, SaveCueInput } from "../../shared/types";
 import { editorStore, useEditorStore, type EditorOwnership } from "../stores/editor-store";
 import { libraryStore } from "../stores/library-store";
+import { useI18n } from "../i18n";
 
 type CueSaveConfirmation = {
   ownership: EditorOwnership;
@@ -16,6 +17,7 @@ type CueSaveConfirmation = {
 };
 
 export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind: "cue" }>; source?: string }) {
+  const { locale, t, translateMessage } = useI18n();
   const [raw, setRaw] = useState(item.rawText);
   const [document, setDocument] = useState<CueDocument>(item.parsed);
   const [confirm, setConfirm] = useState<CueSaveConfirmation>();
@@ -124,32 +126,34 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
   const confirmationCurrent = Boolean(confirm && isConfirmationCurrent(confirm));
   const provenance = document.provenance;
   const confidence = provenance?.confidence ?? "unverified";
+  const confidenceText = t(confidence === "high" ? "confidenceHigh" : confidence === "medium" ? "confidenceMedium" : confidence === "low" ? "confidenceLow" : "confidenceUnverified");
+  const aria = (english: string, chinese: string) => locale === "zh-CN" ? chinese : english;
   return <div className="cue-editor">
-    <h3>CUE editor</h3>
-    <p className="source-banner">Source: {source ?? "local CUE"} · Confidence: {confidence}</p>
+    <h3>{t("cueEditor")}</h3>
+    <p className="source-banner">{t("source")}: {source ? translateMessage(source) : t("localCue")} · {t("confidence")}: {confidenceText}</p>
     {provenance && <div className="cue-provenance">
-      <p>Release ID: {provenance.releaseId}</p>
-      {provenance.discId && <p>Disc ID: {provenance.discId}</p>}
-      {provenance.evidence.map((entry) => <p key={entry}>{entry}</p>)}
-      {provenance.inferred && <p className="warning-text">Inferred candidate</p>}
+      <p>{t("releaseId")}: {provenance.releaseId}</p>
+      {provenance.discId && <p>{t("discId")}: {provenance.discId}</p>}
+      {provenance.evidence.map((entry) => <p key={entry}>{translateMessage(entry)}</p>)}
+      {provenance.inferred && <p className="warning-text">{t("inferredCandidate")}</p>}
     </div>}
-    {validationError && <p className="error-text" role="alert">{validationError}</p>}
-    {saveError && <p className="error-text" role="alert">{saveError}</p>}
-    {item.missingReferencedFiles.length > 0 && <p className="warning-text">Missing references: {item.missingReferencedFiles.join(", ")}</p>}
-    <div className="mode-tabs"><button aria-pressed={mode === "structured"} onClick={() => setMode("structured")}>Structured</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>Raw</button></div>
-    <label>Encoding<select aria-label="encoding" value={encoding} onChange={(event) => setEncoding(event.target.value as CueEncoding)}><option value="utf8">UTF-8</option><option value="utf8-bom">UTF-8 BOM</option><option value="gb18030">GB18030</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift-jis">Shift-JIS</option></select></label>
-    {item.candidateEncodings && item.candidateEncodings.length > 0 && <div className="encoding-candidates">Source previews: {item.candidateEncodings.map((candidate) => <button key={candidate} onClick={() => void reloadSourceEncoding(candidate)}>Decode as {candidate}</button>)}</div>}
-    {mode === "raw" ? <textarea aria-label="raw cue" value={raw} onChange={(event) => { previewGeneration.current += 1; rawRef.current = event.target.value; setRaw(event.target.value); setValidatedRaw(undefined); setValidationError("Validate edited CUE before saving"); }} onBlur={previewRaw} /> : <div className="cue-structured">
-      <label>Album title<input aria-label="cue album title" value={document.title ?? ""} onChange={(event) => setDocument({ ...document, title: event.target.value })} /></label>
-      <label>Album performer<input aria-label="cue album performer" value={document.performer ?? ""} onChange={(event) => setDocument({ ...document, performer: event.target.value })} /></label>
-      {document.files.map((file, index) => <label key={index}>FILE {index + 1}<input aria-label={`cue file ${index + 1}`} value={file.path} onChange={(event) => setDocument({ ...document, files: document.files.map((entry, position) => position === index ? { ...entry, path: event.target.value } : entry) })} /></label>)}
-      {document.tracks.map((track, index) => <fieldset key={track.number}><legend>Track {track.number}</legend><label>Title<input aria-label={`track ${track.number} title`} value={track.title ?? ""} onChange={(event) => updateTrack(index, { title: event.target.value })} /></label><label>Performer<input aria-label={`track ${track.number} performer`} value={track.performer ?? ""} onChange={(event) => updateTrack(index, { performer: event.target.value })} /></label><label>INDEX 01<input aria-label={`track ${track.number} index`} value={track.indexes.find((entry) => entry.number === 1)?.time ?? ""} onChange={(event) => updateTrack(index, { indexes: track.indexes.map((entry) => entry.number === 1 ? { ...entry, time: event.target.value } : entry) })} /></label><label>Pregap<input aria-label={`track ${track.number} pregap`} value={track.pregap ?? ""} onChange={(event) => updateTrack(index, { pregap: event.target.value })} /></label><label>Postgap<input aria-label={`track ${track.number} postgap`} value={track.postgap ?? ""} onChange={(event) => updateTrack(index, { postgap: event.target.value })} /></label></fieldset>)}
+    {validationError && <p className="error-text" role="alert">{translateMessage(validationError)}</p>}
+    {saveError && <p className="error-text" role="alert">{translateMessage(saveError)}</p>}
+    {item.missingReferencedFiles.length > 0 && <p className="warning-text">{t("missingReferences")}: {item.missingReferencedFiles.join(", ")}</p>}
+    <div className="mode-tabs"><button aria-pressed={mode === "structured"} onClick={() => setMode("structured")}>{t("structured")}</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>{t("raw")}</button></div>
+    <label>{t("encoding")}<select aria-label={aria("encoding", t("encoding"))} value={encoding} onChange={(event) => setEncoding(event.target.value as CueEncoding)}><option value="utf8">UTF-8</option><option value="utf8-bom">UTF-8 BOM</option><option value="gb18030">GB18030</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift-jis">Shift-JIS</option></select></label>
+    {item.candidateEncodings && item.candidateEncodings.length > 0 && <div className="encoding-candidates">{t("sourcePreviews")}: {item.candidateEncodings.map((candidate) => <button key={candidate} onClick={() => void reloadSourceEncoding(candidate)}>{t("decodeAs", { encoding: candidate })}</button>)}</div>}
+    {mode === "raw" ? <textarea aria-label={aria("raw cue", t("rawCue"))} value={raw} onChange={(event) => { previewGeneration.current += 1; rawRef.current = event.target.value; setRaw(event.target.value); setValidatedRaw(undefined); setValidationError("Validate edited CUE before saving"); }} onBlur={previewRaw} /> : <div className="cue-structured">
+      <label>{t("albumTitle")}<input aria-label={aria("cue album title", t("albumTitle"))} value={document.title ?? ""} onChange={(event) => setDocument({ ...document, title: event.target.value })} /></label>
+      <label>{t("albumPerformer")}<input aria-label={aria("cue album performer", t("albumPerformer"))} value={document.performer ?? ""} onChange={(event) => setDocument({ ...document, performer: event.target.value })} /></label>
+      {document.files.map((file, index) => <label key={index}>FILE {index + 1}<input aria-label={aria(`cue file ${index + 1}`, `CUE 文件 ${index + 1}`)} value={file.path} onChange={(event) => setDocument({ ...document, files: document.files.map((entry, position) => position === index ? { ...entry, path: event.target.value } : entry) })} /></label>)}
+      {document.tracks.map((track, index) => <fieldset key={track.number}><legend>{t("track", { number: track.number })}</legend><label>{t("title")}<input aria-label={aria(`track ${track.number} title`, `音轨 ${track.number} 标题`)} value={track.title ?? ""} onChange={(event) => updateTrack(index, { title: event.target.value })} /></label><label>{t("performer")}<input aria-label={aria(`track ${track.number} performer`, `音轨 ${track.number} 表演者`)} value={track.performer ?? ""} onChange={(event) => updateTrack(index, { performer: event.target.value })} /></label><label>INDEX 01<input aria-label={aria(`track ${track.number} index`, `音轨 ${track.number} 索引`)} value={track.indexes.find((entry) => entry.number === 1)?.time ?? ""} onChange={(event) => updateTrack(index, { indexes: track.indexes.map((entry) => entry.number === 1 ? { ...entry, time: event.target.value } : entry) })} /></label><label>{t("pregap")}<input aria-label={aria(`track ${track.number} pregap`, `音轨 ${track.number} 前置间隙`)} value={track.pregap ?? ""} onChange={(event) => updateTrack(index, { pregap: event.target.value })} /></label><label>{t("postgap")}<input aria-label={aria(`track ${track.number} postgap`, `音轨 ${track.number} 后置间隙`)} value={track.postgap ?? ""} onChange={(event) => updateTrack(index, { postgap: event.target.value })} /></label></fieldset>)}
     </div>}
-    <button disabled={Boolean(validationError) || (mode === "raw" && validatedRaw !== raw)} onClick={() => void openConfirmation()}>Save CUE</button>
+    <button disabled={Boolean(validationError) || (mode === "raw" && validatedRaw !== raw)} onClick={() => void openConfirmation()}>{t("saveCue")}</button>
     {confirmationCurrent && confirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body">
-      {confirm.generated ? <p>This creates a new CUE file.</p> : <p>Saving creates a .bak backup.</p>}
-      {provenance?.inferred && provenance.confidence === "low" && <p className="warning-text">Review this inferred, low-confidence candidate before saving.</p>}
-      <button onClick={() => void save(confirm)} aria-label="confirm cue save">Confirm CUE save</button><button onClick={() => setConfirm(undefined)}>Cancel</button>
+      {confirm.generated ? <p>{t("createsNewCue")}</p> : <p>{t("createsBackup")}</p>}
+      {provenance?.inferred && provenance.confidence === "low" && <p className="warning-text">{t("reviewLowConfidence")}</p>}
+      <button onClick={() => void save(confirm)} aria-label={t("confirmCueSave")}>{t("confirmCueSave")}</button><button onClick={() => setConfirm(undefined)}>{t("cancel")}</button>
     </div></div>}
   </div>;
 }

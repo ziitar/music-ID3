@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { CookieSource, CookieStatus } from "../../shared/types";
+import { useI18n, type Locale } from "../i18n";
 
 type ProviderState = { cookie: string; status: CookieStatus; message?: string; connectionMessage?: string };
 type ProviderGenerations = Record<CookieSource, number>;
 
 export function SettingsPanel() {
+  const { locale, setLocale, t, translateMessage } = useI18n();
   const [source, setSource] = useState<CookieSource>("netease");
   const [providers, setProviders] = useState<Record<CookieSource, ProviderState>>({ netease: { cookie: "", status: "unconfigured" }, qq: { cookie: "", status: "unconfigured" } });
   const mounted = useRef(true);
@@ -77,5 +79,6 @@ export function SettingsPanel() {
     catch { if (mounted.current && cacheOperation.current === operation) update(provider, { message: "Unable to clear online cache" }); }
   };
 
-  return <details className="settings-panel"><summary>Settings</summary><label>Provider<select aria-label="Cookie provider" value={source} onChange={(event) => setSource(event.target.value as CookieSource)}><option value="netease">NetEase</option><option value="qq">QQ Music</option></select></label><textarea aria-label="cookie" value={current.cookie} onChange={(event) => update(source, { cookie: event.target.value })} placeholder="Paste Cookie" /><div className="cookie-actions"><button disabled={!current.cookie.trim()} onClick={() => void save()}>Save Cookie</button><button onClick={() => void test()}>Test</button><button onClick={() => void clear()}>Clear</button><span aria-label="Cookie status">{current.status}</span></div><button onClick={() => void clearCache()}>Clear online cache</button>{current.connectionMessage && <p className={current.connectionMessage.includes("failed") ? "error-text" : "status-text"} role="status">{current.connectionMessage}</p>}{current.message && <p className={current.message.includes("failed") || current.message.includes("Unable") ? "error-text" : "status-text"} role="status">{current.message}</p>}</details>;
+  const aria = (english: string, chinese: string) => locale === "zh-CN" ? chinese : english;
+  return <details className="settings-panel"><summary>{t("settings")}</summary><label>{t("language")}<select aria-label={t("language")} value={locale} onChange={(event) => setLocale(event.target.value as Locale)}><option value="zh-CN">{t("simplifiedChinese")}</option><option value="en-US">{t("english")}</option></select></label><label>{t("providerLabel")}<select aria-label={aria("Cookie provider", t("cookieProvider"))} value={source} onChange={(event) => setSource(event.target.value as CookieSource)}><option value="netease">NetEase</option><option value="qq">QQ Music</option></select></label><textarea aria-label={aria("cookie", "Cookie")} value={current.cookie} onChange={(event) => update(source, { cookie: event.target.value })} placeholder={t("pasteCookie")} /><div className="cookie-actions"><button disabled={!current.cookie.trim()} onClick={() => void save()}>{t("saveCookie")}</button><button onClick={() => void test()}>{t("test")}</button><button onClick={() => void clear()}>{t("clear")}</button><span aria-label={aria("Cookie status", t("cookieStatus"))}>{t(current.status)}</span></div><button onClick={() => void clearCache()}>{t("clearOnlineCache")}</button>{current.connectionMessage && <p className={current.connectionMessage.includes("failed") ? "error-text" : "status-text"} role="status">{translateMessage(current.connectionMessage)}</p>}{current.message && <p className={current.message.includes("failed") || current.message.includes("Unable") ? "error-text" : "status-text"} role="status">{translateMessage(current.message)}</p>}</details>;
 }

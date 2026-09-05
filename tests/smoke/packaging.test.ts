@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { load } from "js-yaml";
 import { describe, expect, it } from "vitest";
+import viteConfig from "../../vite.config";
 
 type BuilderConfig = {
   npmRebuild?: boolean;
@@ -12,6 +13,10 @@ type BuilderConfig = {
 };
 
 describe("Windows packaging configuration", () => {
+  it("uses relative renderer assets that load from a packaged file URL", () => {
+    expect(viteConfig.base).toBe("./");
+  });
+
   it("rejects package directories metadata that electron-builder treats as deprecated config", () => {
     const packagePath = path.resolve(process.cwd(), "package.json");
     const manifest = JSON.parse(readFileSync(packagePath, "utf8")) as { directories?: unknown };

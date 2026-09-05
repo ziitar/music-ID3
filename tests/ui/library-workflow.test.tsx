@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../src/App";
 import { editorStore } from "../../src/stores/editor-store";
 import { libraryStore } from "../../src/stores/library-store";
+import { setLocale } from "../../src/i18n";
 import type { LibraryItem, ScanProgress } from "../../shared/types";
 
 let preparedCueSequence = 0;
@@ -20,6 +21,7 @@ function audioItem(overrides: Partial<Extract<LibraryItem, { kind: "audio" }>> =
 describe("library editing workflow", () => {
   let progressListener: ((progress: ScanProgress) => void) | undefined;
   beforeEach(() => {
+    setLocale("en-US");
     progressListener = undefined;
     window.musicId3 = {
       selectDirectory: vi.fn(async () => "D:/音乐"),
@@ -40,6 +42,25 @@ describe("library editing workflow", () => {
     };
   });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it("uses Chinese by default and persists an explicit language change", () => {
+    localStorage.removeItem("music-id3.locale");
+    setLocale("zh-CN");
+    render(<App />);
+
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(document.title).toBe("音乐资料库");
+    expect(screen.getByRole("button", { name: "扫描文件夹" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "文件夹" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "资料库" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "详细信息" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("设置"));
+    fireEvent.change(screen.getByLabelText("语言"), { target: { value: "en-US" } });
+    expect(screen.getByRole("button", { name: "Scan folder" })).toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("en-US");
+    expect(localStorage.getItem("music-id3.locale")).toBe("en-US");
+  });
 
   it("renders three panes and progressively adds scan results", async () => {
     render(<App />);

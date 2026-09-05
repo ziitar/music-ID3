@@ -4,6 +4,7 @@ import { libraryStore } from "../stores/library-store";
 import type { CoverArt } from "../../shared/types";
 import { CueEditor } from "./CueEditor";
 import { MetadataCandidates } from "./MetadataCandidates";
+import { useI18n } from "../i18n";
 
 type PendingWrite = { confirmation: AudioWriteConfirmation; libraryGeneration: number };
 type CoverClearConfirmation = {
@@ -18,6 +19,7 @@ function valueText(value: unknown): string {
 }
 
 export function MetadataPanel() {
+  const { locale, t, translateMessage } = useI18n();
   const state = useEditorStore((value) => value);
   const { item, draft, selectedFields, diff, cueDraft, error } = state;
   const [confirm, setConfirm] = useState<PendingWrite>();
@@ -46,9 +48,9 @@ export function MetadataPanel() {
     setCoverConfirm(undefined);
   }, [state.generation]);
 
-  if (!item) return <aside className="pane details-pane" aria-label="Details"><h2>Details</h2><p className="empty-state">Select a file to inspect.</p></aside>;
+  if (!item) return <aside className="pane details-pane" aria-label={t("details")}><h2>{t("details")}</h2><p className="empty-state">{t("selectFile")}</p></aside>;
   const candidateCueItem = cueDraft ? { kind: "cue" as const, path: item.kind === "cue" ? item.path : `${item.path}.cue`, encoding: item.kind === "cue" ? item.encoding : "utf8-bom" as const, rawText: "", parsed: cueDraft, referencedFiles: item.kind === "cue" ? item.referencedFiles : [item.path], missingReferencedFiles: [] } : undefined;
-  if (item.kind === "cue") return <aside className="pane details-pane" aria-label="Details"><CueEditor key={`${item.path}:${candidateCueItem ? "candidate" : "local"}`} item={candidateCueItem ?? item} source={candidateCueItem ? state.candidateSource : undefined} /><MetadataCandidates /></aside>;
+  if (item.kind === "cue") return <aside className="pane details-pane" aria-label={t("details")}><CueEditor key={`${item.path}:${candidateCueItem ? "candidate" : "local"}`} item={candidateCueItem ?? item} source={candidateCueItem ? state.candidateSource : undefined} /><MetadataCandidates /></aside>;
 
   const fields = [
     { name: "title", numeric: false }, { name: "artist", numeric: false }, { name: "album", numeric: false },
@@ -107,19 +109,19 @@ export function MetadataPanel() {
   const confirmationCurrent = Boolean(confirm && editorStore.isAudioWriteConfirmationCurrent(confirm.confirmation));
   const coverConfirmationCurrent = Boolean(coverConfirm && isCoverConfirmationCurrent(coverConfirm));
 
-  return <aside className="pane details-pane" aria-label="Details">
-    <h2>Details</h2><h3 data-testid="details-file-name">{item.fileName}</h3>{error && <p className="error-text" role="alert">{error}</p>}
-    {suspected && <div className="guidance"><p>Suspected whole-track CUE. Use the whole-track CUE candidate flow.</p><button onClick={() => window.dispatchEvent(new CustomEvent("music-id3:override", { detail: item.path }))}>Use normal audio editing</button></div>}
+  return <aside className="pane details-pane" aria-label={t("details")}>
+    <h2>{t("details")}</h2><h3 data-testid="details-file-name">{item.fileName}</h3>{error && <p className="error-text" role="alert">{translateMessage(error)}</p>}
+    {suspected && <div className="guidance"><p>{t("suspectedCue")}</p><button onClick={() => window.dispatchEvent(new CustomEvent("music-id3:override", { detail: item.path }))}>{t("normalAudioEditing")}</button></div>}
     {candidateCueItem && <CueEditor key="candidate-cue" item={candidateCueItem} source={state.candidateSource} />}
-    <div className="mode-tabs"><button aria-pressed={mode === "common"} onClick={() => setMode("common")}>Common tags</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>Raw tags</button></div>
-    {mode === "raw" ? <pre className="raw-tags" aria-label="raw tags read only" data-testid="raw-tags">{JSON.stringify(item.metadata.raw, null, 2)}</pre> : <>
-      <div className="cover-controls">{currentCover ? <img className="cover-preview" alt="cover preview" src={`data:${currentCover.mimeType};base64,${currentCover.data}`} /> : <div className="cover-empty">No cover</div>}<span>{currentCover?.mimeType ?? "No cover selected"}</span><button disabled={suspected || unsupported} onClick={openCoverConfirmation}>Remove cover</button><label className="file-button">Replace cover<input aria-label="cover file" type="file" accept="image/*" hidden disabled={suspected || unsupported} onChange={(event) => readCover(event.target.files?.[0])} /></label></div>
-      <div className="tag-editor">{fields.map((field) => <label key={field.name}><input type="checkbox" aria-label={field.name} checked={selectedFields.includes(field.name)} disabled={suspected || unsupported} onChange={(event) => editorStore.setFieldSelected(field.name, event.target.checked)} /><span>{field.name}{unsupported ? " (unsupported)" : ""}</span><input aria-label={`${field.name} value`} type={field.numeric ? "number" : "text"} {...(field.numeric ? { min: 0, step: 1 } : {})} value={String(draft[field.name] ?? "")} disabled={suspected || unsupported} onChange={(event) => editorStore.setField(field.name, field.numeric ? (event.target.value === "" ? undefined : Number(event.target.value)) : event.target.value)} /></label>)}</div>
-      <button disabled={suspected || unsupported || selectedFields.length === 0} onClick={() => editorStore.previewDiff()}>Preview diff</button>
-      {diff.length > 0 && <div className="diff-preview" data-testid="metadata-diff">{diff.map((entry) => <div key={entry.field}><strong>{entry.field}</strong>: <del>{valueText(entry.oldValue)}</del> <ins>{valueText(entry.newValue)}</ins></div>)}<button onClick={openWriteConfirmation}>Write selected fields</button></div>}
+    <div className="mode-tabs"><button aria-pressed={mode === "common"} onClick={() => setMode("common")}>{t("commonTags")}</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>{t("rawTags")}</button></div>
+    {mode === "raw" ? <pre className="raw-tags" aria-label={t("rawTagsReadOnly")} data-testid="raw-tags">{JSON.stringify(item.metadata.raw, null, 2)}</pre> : <>
+      <div className="cover-controls">{currentCover ? <img className="cover-preview" alt={t("coverPreview")} src={`data:${currentCover.mimeType};base64,${currentCover.data}`} /> : <div className="cover-empty">{t("noCover")}</div>}<span>{currentCover?.mimeType ?? t("noCoverSelected")}</span><button disabled={suspected || unsupported} onClick={openCoverConfirmation}>{t("removeCover")}</button><label className="file-button">{t("replaceCover")}<input aria-label={t("coverFile")} type="file" accept="image/*" hidden disabled={suspected || unsupported} onChange={(event) => readCover(event.target.files?.[0])} /></label></div>
+      <div className="tag-editor">{fields.map((field) => { const label = t(field.name); return <label key={field.name}><input type="checkbox" aria-label={locale === "zh-CN" ? label : field.name} checked={selectedFields.includes(field.name)} disabled={suspected || unsupported} onChange={(event) => editorStore.setFieldSelected(field.name, event.target.checked)} /><span>{label}{unsupported ? ` (${t("unsupported")})` : ""}</span><input aria-label={locale === "zh-CN" ? `${label}值` : `${field.name} value`} type={field.numeric ? "number" : "text"} {...(field.numeric ? { min: 0, step: 1 } : {})} value={String(draft[field.name] ?? "")} disabled={suspected || unsupported} onChange={(event) => editorStore.setField(field.name, field.numeric ? (event.target.value === "" ? undefined : Number(event.target.value)) : event.target.value)} /></label>; })}</div>
+      <button disabled={suspected || unsupported || selectedFields.length === 0} onClick={() => editorStore.previewDiff()}>{t("previewDiff")}</button>
+      {diff.length > 0 && <div className="diff-preview" data-testid="metadata-diff">{diff.map((entry) => <div key={entry.field}><strong>{t(entry.field as typeof fields[number]["name"])}</strong>: <del>{valueText(entry.oldValue)}</del> <ins>{valueText(entry.newValue)}</ins></div>)}<button onClick={openWriteConfirmation}>{t("writeSelectedFields")}</button></div>}
     </>}
-    {coverConfirmationCurrent && coverConfirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>Clear cover art?</p><button onClick={() => { if (!isCoverConfirmationCurrent(coverConfirm)) { setCoverConfirm(undefined); return; } abortCoverRead(); selectCover(undefined); setCoverConfirm(undefined); }}>Confirm clear</button><button onClick={() => setCoverConfirm(undefined)}>Cancel</button></div></div>}
-    {confirmationCurrent && confirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>Confirm writing selected fields?</p><button aria-label="confirm write" onClick={() => void write(confirm)}>Confirm write</button><button onClick={() => setConfirm(undefined)}>Cancel</button></div></div>}
+    {coverConfirmationCurrent && coverConfirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>{t("clearCoverQuestion")}</p><button onClick={() => { if (!isCoverConfirmationCurrent(coverConfirm)) { setCoverConfirm(undefined); return; } abortCoverRead(); selectCover(undefined); setCoverConfirm(undefined); }}>{t("confirmClear")}</button><button onClick={() => setCoverConfirm(undefined)}>{t("cancel")}</button></div></div>}
+    {confirmationCurrent && confirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>{t("confirmWriteQuestion")}</p><button aria-label={t("confirmWrite")} onClick={() => void write(confirm)}>{t("confirmWrite")}</button><button onClick={() => setConfirm(undefined)}>{t("cancel")}</button></div></div>}
     <MetadataCandidates />
   </aside>;
 }

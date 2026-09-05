@@ -1,5 +1,6 @@
 import { editorStore } from "../stores/editor-store";
 import { libraryStore, useLibraryStore } from "../stores/library-store";
+import { useI18n } from "../i18n";
 
 type DirectoryNode = { name: string; path: string; children: DirectoryNode[] };
 
@@ -40,6 +41,7 @@ function DirectoryBranch({ nodes, selected, select }: { nodes: DirectoryNode[]; 
 }
 
 export function DirectoryTree() {
+  const { t, translateMessage } = useI18n();
   const root = useLibraryStore((state) => state.root);
   const items = useLibraryStore((state) => state.items);
   const currentDirectory = useLibraryStore((state) => state.currentDirectory);
@@ -47,12 +49,12 @@ export function DirectoryTree() {
   const error = useLibraryStore((state) => state.error);
   const select = (directory?: string) => { editorStore.setItem(undefined); libraryStore.setCurrentDirectory(directory); };
   const nodes = root ? directoryNodes(root, items.map((item) => item.path)) : [];
-  return <aside className="pane directory-pane" aria-label="Directories">
-    <h2>Directories</h2>
-    <button className="toolbar-button" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}>Choose folder</button>
-    <div className="directory-root" data-testid="directory-root">{root ?? "No folder selected"}</div>
-    {root && <nav aria-label="Library directories"><button aria-pressed={!currentDirectory} onClick={() => select(undefined)}>All files</button><DirectoryBranch nodes={nodes} selected={currentDirectory} select={select} /></nav>}
-    {scanning && <div role="status" data-testid="scan-progress">Scanning... <button onClick={() => window.dispatchEvent(new Event("music-id3:cancel-scan"))}>Cancel</button></div>}
-    {error && <p className="error-text">{error}</p>}
+  return <aside className="pane directory-pane" aria-label={t("directories")}>
+    <h2>{t("directories")}</h2>
+    <button className="toolbar-button" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}>{t("chooseFolder")}</button>
+    <div className="directory-root" data-testid="directory-root">{root ?? t("noFolderSelected")}</div>
+    {root && <nav aria-label={t("libraryDirectories")}><button aria-pressed={!currentDirectory} onClick={() => select(undefined)}>{t("allFiles")}</button><DirectoryBranch nodes={nodes} selected={currentDirectory} select={select} /></nav>}
+    {scanning && <div role="status" data-testid="scan-progress">{t("scanning")} <button onClick={() => window.dispatchEvent(new Event("music-id3:cancel-scan"))}>{t("cancel")}</button></div>}
+    {error && <p className="error-text">{translateMessage(error)}</p>}
   </aside>;
 }
