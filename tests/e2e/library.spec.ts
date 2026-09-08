@@ -36,13 +36,13 @@ test("catches a supported audio format or mixed-case extension disappearing from
   for (const [fileName, format] of expectedFormats) {
     const row = page.getByTestId("library-row").filter({ has: page.getByText(fileName, { exact: true }) });
     await expect(row).toHaveCount(1);
-    await expect(row.locator("span").nth(0)).toHaveText(fileName);
-    await expect(row.locator("span").nth(1)).toHaveText(format);
+    await expect(row.locator(".file-name")).toHaveText(fileName);
+    await expect(row.locator(".format-copy strong")).toHaveText(format);
   }
 
   for (const fileName of ["editable.Mp3", "disc.WaV", "fixture.FlAc", "fixture.m4A", "fixture.MP4", "fixture.OgG", "fixture.oPuS", "fixture.ApE"]) {
     const row = page.getByTestId("library-row").filter({ has: page.getByText(fileName, { exact: true }) });
-    await expect(row.locator("span").nth(2)).not.toHaveText("0:00");
+    await expect(row.locator(".format-copy small")).not.toHaveText("0:00");
   }
   await expect(page.getByTestId("library-row").filter({ hasText: "long-unassociated.MP3" })).toContainText("suspected");
   await expect(page.getByTestId("library-row").filter({ hasText: "missing-file.cue" })).toContainText("missing CUE refs");
@@ -54,7 +54,7 @@ test("catches metadata details becoming editable before a suspected whole-track 
   await expect(page.getByTestId("library-count")).toHaveText("13 items");
 
   await page.getByTestId("library-row").filter({ hasText: "editable.Mp3" }).click();
-  await expect(page.getByTestId("details-file-name")).toHaveText("editable.Mp3");
+  await expect(page.getByTestId("details-file-name")).toContainText("editable.Mp3");
   await expect(page.getByLabel("title value")).toHaveValue("Before E2E");
   await page.getByRole("button", { name: "Raw tags" }).click();
   await expect(page.getByTestId("raw-tags")).toContainText("Before E2E");

@@ -10,6 +10,8 @@ import type {
   MetadataPatch,
   MetadataSearchContext,
   MetadataSource,
+  OrganizePlan,
+  OrganizeResult,
   PrepareCueSaveInput,
   SaveCueInput,
   SaveCueResult,
@@ -36,6 +38,9 @@ export const ipcChannels = {
   testProviderCookie: "music-id3:test-provider-cookie",
   getProviderCookieStatus: "music-id3:get-provider-cookie-status",
   clearOnlineCache: "music-id3:clear-online-cache",
+  selectOrganizeDirectory: "music-id3:select-organize-directory",
+  prepareLibraryOrganization: "music-id3:prepare-library-organization",
+  executeLibraryOrganization: "music-id3:execute-library-organization",
   scanProgress: "music-id3:scan-progress"
 } as const;
 
@@ -65,6 +70,9 @@ export type MusicId3Api = {
   testProviderCookie(source: CookieSource): Promise<CookieTestResult>;
   getProviderCookieStatus(source: CookieSource): Promise<CookieStatus>;
   clearOnlineCache(): Promise<void>;
+  selectOrganizeDirectory(): Promise<string | undefined>;
+  prepareLibraryOrganization(paths: string[], targetRoot: string): Promise<OrganizePlan>;
+  executeLibraryOrganization(confirmationToken: string): Promise<OrganizeResult>;
   onScanProgress(listener: (progress: ScanProgress) => void): () => void;
 };
 

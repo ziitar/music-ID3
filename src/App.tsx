@@ -1,8 +1,10 @@
 import { useEffect } from "react";
+import { FolderOpen, LibraryBig } from "lucide-react";
 import { DirectoryTree } from "./components/DirectoryTree";
 import { LibraryList } from "./components/LibraryList";
 import { MetadataPanel } from "./components/MetadataPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { OrganizerTray } from "./components/OrganizerTray";
 import { editorStore } from "./stores/editor-store";
 import { libraryStore } from "./stores/library-store";
 import { useI18n } from "./i18n";
@@ -17,5 +19,5 @@ export function App() {
     window.addEventListener("music-id3:select-root", onRoot); window.addEventListener("music-id3:select-item", onItem); window.addEventListener("music-id3:override", onOverride); window.addEventListener("music-id3:cancel-scan", onCancel);
     return () => { window.removeEventListener("music-id3:select-root", onRoot); window.removeEventListener("music-id3:select-item", onItem); window.removeEventListener("music-id3:override", onOverride); window.removeEventListener("music-id3:cancel-scan", onCancel); };
   }, []);
-  return <main className="app-shell"><header className="app-header"><h1>{t("appTitle")}</h1><button className="scan-button" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}>{t("scanFolder")}</button><SettingsPanel /></header><div className="workspace"><DirectoryTree /><LibraryList /><MetadataPanel /></div></main>;
+  return <main className="app-shell"><header className="app-header"><div className="brand-lockup"><span className="brand-mark"><LibraryBig aria-hidden="true" /></span><div><h1>Music ID3</h1><span>{t("appTagline")}</span></div></div><div className="header-actions"><button className="primary-action" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}><FolderOpen aria-hidden="true" />{t("scanFolder")}</button><button className="secondary-action" onClick={() => window.dispatchEvent(new Event("music-id3:open-organizer"))}><LibraryBig aria-hidden="true" />{t("formatDirectory")}</button><SettingsPanel /></div></header><div className="workspace"><DirectoryTree /><LibraryList /><MetadataPanel /></div><OrganizerTray /></main>;
 }

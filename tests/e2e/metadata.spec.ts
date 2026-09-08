@@ -41,9 +41,9 @@ test("catches provider candidates being written without a second explicit confir
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const candidate = page.getByTestId("metadata-candidate").filter({ hasText: "Kind of Blue" });
   await expect(candidate).toContainText("Miles Davis");
-  await candidate.getByRole("button", { name: "Load candidate details" }).click();
+  await candidate.click();
   await expect(candidate.getByAltText("candidate cover")).toBeVisible();
-  await candidate.getByRole("button", { name: "Apply candidate" }).click();
+  await page.getByTestId("candidate-comparison").getByRole("button", { name: "Overwrite selected fields" }).click();
   await expect(page.getByRole("dialog")).toContainText("Review selected changes before writing.");
   await page.getByRole("button", { name: "Cancel" }).click();
   await page.getByTestId("library-row").filter({ hasText: "disc.WaV" }).click();
@@ -52,8 +52,8 @@ test("catches provider candidates being written without a second explicit confir
 
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const confirmedCandidate = page.getByTestId("metadata-candidate").filter({ hasText: "Kind of Blue" });
-  await confirmedCandidate.getByRole("button", { name: "Load candidate details" }).click();
-  await confirmedCandidate.getByRole("button", { name: "Apply candidate" }).click();
+  await confirmedCandidate.click();
+  await page.getByTestId("candidate-comparison").getByRole("button", { name: "Overwrite selected fields" }).click();
   await page.getByRole("button", { name: "confirm candidate write" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByTestId("library-row").filter({ hasText: "disc.WaV" }).click();
@@ -91,9 +91,9 @@ for (const provider of [
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const candidate = page.getByTestId("metadata-candidate").filter({ hasText: provider.title });
     await expect(candidate).toContainText(provider.artist);
-    await candidate.getByRole("button", { name: "Load candidate details" }).click();
+    await candidate.click();
     await expect(candidate.getByAltText("candidate cover")).toBeVisible();
-    await candidate.getByRole("button", { name: "Apply candidate" }).click();
+    await page.getByTestId("candidate-comparison").getByRole("button", { name: "Overwrite selected fields" }).click();
     await page.getByRole("button", { name: "confirm candidate write" }).click();
     await expect(page.getByRole("textbox", { name: "title value", exact: true })).toHaveValue(provider.title);
     await expect(page.getByRole("textbox", { name: "artist value", exact: true })).toHaveValue(provider.artist);

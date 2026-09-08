@@ -23,6 +23,7 @@ import { isSupportedAudioPath } from "../services/audio-format";
 import { buildCandidateCue } from "../services/cue-candidate";
 import { cueDocumentForSave, parseCue, prepareCueSave, readCue, saveCue } from "../services/cue-service";
 import { scanDirectory } from "../services/library-scanner";
+import { libraryOrganizer, type LibraryOrganizer } from "../services/library-organizer";
 import { scoreCandidate, type MetadataAdapter } from "../services/metadata/adapter";
 import type { CtdbAdapter } from "../services/metadata/ctdb-adapter";
 import { readAudioMetadata, writeAudioMetadata } from "../services/tag-service";
@@ -51,12 +52,15 @@ type RegisterIpcHandlersOptions = {
   readCueFile?: typeof readCue;
   prepareCueSaveFile?: typeof prepareCueSave;
   saveCueFile?: typeof saveCue;
+  organizer?: LibraryOrganizer;
 };
 
 type RendererAuthorization = {
   canonicalRoot: string;
   scanFacts: Map<string, Extract<LibraryItem, { kind: "audio" }>["wholeTrackStatus"]>;
   audioOverrides: Set<string>;
+  cueLinkedAudioPaths: Set<string>;
+  organizeRoot?: string;
 };
 
 const metadataFields = new Set<keyof CommonMetadata>([
@@ -190,7 +194,8 @@ export function registerIpcHandlers({
   writeAudio = writeAudioMetadata,
   readCueFile = readCue,
   prepareCueSaveFile = prepareCueSave,
-  saveCueFile = saveCue
+  saveCueFile = saveCue,
+  organizer = libraryOrganizer
 }: RegisterIpcHandlersOptions): void {
   const authorizations = new Map<number, RendererAuthorization>();
   const cleanupRegistered = new Set<number>();
@@ -199,6 +204,7 @@ export function registerIpcHandlers({
   const scanKey = (senderId: number, requestId: string) => `${senderId}\0${requestId}`;
   const clearSender = (senderId: number): void => {
     authorizations.delete(senderId);
+    organizer.clearOwner(String(senderId));
     for (const [key, controller] of scans) {
       if (key.startsWith(`${senderId}\0`)) {
         controller.abort();
@@ -306,7 +312,7 @@ export function registerIpcHandlers({
     const canonicalRoot = await realpath(result.filePaths[0]);
     if (!(await stat(canonicalRoot)).isDirectory()) throw new Error("Selected path is not a directory");
     clearSender(sender.id);
-    authorizations.set(sender.id, { canonicalRoot, scanFacts: new Map(), audioOverrides: new Set() });
+    authorizations.set(sender.id, { canonicalRoot, scanFacts: new Map(), audioOverrides: new Set(), cueLinkedAudioPaths: new Set() });
     if (!cleanupRegistered.has(sender.id) && sender.once) {
       cleanupRegistered.add(sender.id);
       sender.once("destroyed", () => { clearSender(sender.id); cleanupRegistered.delete(sender.id); });
@@ -325,9 +331,13 @@ export function registerIpcHandlers({
     scans.set(key, controller);
     authorization.scanFacts.clear();
     authorization.audioOverrides.clear();
+    authorization.cueLinkedAudioPaths.clear();
     void scanLibrary(root, (item) => {
       if (controller.signal.aborted || authorizations.get(sender.id) !== authorization) return;
-      if (item.kind === "audio" && isContained(authorization.canonicalRoot, path.resolve(item.path))) authorization.scanFacts.set(pathKey(item.path), item.wholeTrackStatus);
+      if (item.kind === "audio" && isContained(authorization.canonicalRoot, path.resolve(item.path))) {
+        authorization.scanFacts.set(pathKey(item.path), item.wholeTrackStatus);
+        if (item.cuePath) authorization.cueLinkedAudioPaths.add(pathKey(item.path));
+      }
       scannedCount += 1;
       publishScanProgress(event, { requestId, scanId, item, scannedCount, phase: "scanning" });
     }, controller.signal).then((summary) => {
@@ -471,4 +481,52 @@ export function registerIpcHandlers({
   });
   ipcMain.handle(ipcChannels.getProviderCookieStatus, (_event, source) => cookieStore.redacted(asCookieSource(source)));
   ipcMain.handle(ipcChannels.clearOnlineCache, async () => clearOnlineCache());
+  ipcMain.handle(ipcChannels.selectOrganizeDirectory, async (event) => {
+    const { sender, authorization } = authorizationFor(event);
+    const result = await showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+    if (result.canceled || !result.filePaths[0]) return undefined;
+    const canonicalRoot = await realpath(result.filePaths[0]);
+    if (!(await stat(canonicalRoot)).isDirectory()) throw new Error("Selected organize target is not a directory");
+    organizer.clearOwner(String(sender.id));
+    authorization.organizeRoot = canonicalRoot;
+    return canonicalRoot;
+  });
+  ipcMain.handle(ipcChannels.prepareLibraryOrganization, async (event, pathsValue, targetRootValue) => {
+    const { sender, authorization } = authorizationFor(event);
+    if (!Array.isArray(pathsValue) || pathsValue.length === 0 || pathsValue.length > 500) {
+      throw new TypeError("Organization paths must be a non-empty bounded array");
+    }
+    const paths = [...new Set(pathsValue.map((value, index) => asNonEmptyString(value, `paths[${index}]`)))];
+    const targetRoot = await realpath(asNonEmptyString(targetRootValue, "targetRoot"));
+    if (!authorization.organizeRoot || pathKey(targetRoot) !== pathKey(authorization.organizeRoot)) {
+      throw new Error("Choose the organize target directory again");
+    }
+    const tracks = await Promise.all(paths.map(async (audioPath) => {
+      const { canonicalPath } = await resolveAuthorizedPath(event, audioPath, "audio");
+      const key = pathKey(canonicalPath);
+      const fact = authorization.scanFacts.get(key);
+      if (!fact) throw new Error("Audio path was not established by the current scan");
+      if (fact === "suspected" && !authorization.audioOverrides.has(key)) throw new Error("Suspected whole-track audio cannot be organized");
+      if (authorization.cueLinkedAudioPaths.has(key)) throw new Error("CUE-linked audio cannot be organized independently");
+      const metadata = await readAudio(canonicalPath);
+      return { sourcePath: canonicalPath, metadata: metadata.common };
+    }));
+    return organizer.prepare(tracks, targetRoot, String(sender.id));
+  });
+  ipcMain.handle(ipcChannels.executeLibraryOrganization, async (event, confirmationTokenValue) => {
+    const { sender, authorization } = authorizationFor(event);
+    const result = await organizer.execute(asNonEmptyString(confirmationTokenValue, "confirmationToken"), String(sender.id));
+    if (result.ok) {
+      for (const move of result.moved) {
+        const sourceKey = pathKey(move.sourcePath);
+        const fact = authorization.scanFacts.get(sourceKey);
+        authorization.scanFacts.delete(sourceKey);
+        authorization.audioOverrides.delete(sourceKey);
+        if (fact && isContained(authorization.canonicalRoot, path.resolve(move.destinationPath))) {
+          authorization.scanFacts.set(pathKey(move.destinationPath), fact);
+        }
+      }
+    }
+    return result;
+  });
 }

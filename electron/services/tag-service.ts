@@ -168,7 +168,7 @@ function mapMetadata(handle: TagLibHandle, format: string): AudioMetadata {
   const common: CommonMetadata = {
     title: tag.title || undefined,
     artist: first(tag.performers),
-    albumArtist: first(tag.albumArtists),
+    albumArtist: tag.albumArtists?.filter(Boolean).join(" / ") || undefined,
     album: tag.album || undefined,
     trackNumber: positive(tag.track),
     trackTotal: positive(tag.trackCount),

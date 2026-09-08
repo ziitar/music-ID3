@@ -212,3 +212,30 @@ export type ScanProgress = {
   phase: "scanning" | "complete" | "error";
   error?: string;
 };
+
+export type OrganizePlanEntry = {
+  sourcePath: string;
+  destinationPath?: string;
+  relativePath?: string;
+  status: "ready" | "unchanged" | "blocked";
+  reason?: string;
+};
+
+export type OrganizePlan = {
+  confirmationToken: string;
+  targetRoot: string;
+  entries: OrganizePlanEntry[];
+  readyCount: number;
+};
+
+export type OrganizeResult =
+  | {
+      ok: true;
+      moved: Array<{ sourcePath: string; destinationPath: string }>;
+      unchanged: string[];
+    }
+  | {
+      ok: false;
+      error: string;
+      rolledBack: boolean;
+    };

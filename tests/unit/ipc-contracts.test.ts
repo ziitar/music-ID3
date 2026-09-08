@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerIpcHandlers } from "../../electron/ipc/register-ipc";
 import { ipcChannels, isIpcChannel } from "../../shared/ipc";
-import type { CueDocument } from "../../shared/types";
+import type { CueDocument, LibraryItem } from "../../shared/types";
 
 const temporaryDirectories: string[] = [];
 type Handler = (event: unknown, ...args: unknown[]) => unknown;
@@ -21,6 +21,20 @@ async function createTempDir(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "music-id3-ipc-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function scannedAudio(audioPath: string, overrides: Partial<Extract<LibraryItem, { kind: "audio" }>> = {}): Extract<LibraryItem, { kind: "audio" }> {
+  return {
+    kind: "audio",
+    path: audioPath,
+    fileName: path.basename(audioPath),
+    extension: path.extname(audioPath),
+    sizeBytes: 5,
+    durationMs: 1000,
+    metadata: { common: { title: "Track", artist: "Artist", album: "Album" }, raw: {}, durationMs: 1000 },
+    wholeTrackStatus: "normal",
+    ...overrides
+  };
 }
 
 afterEach(async () => {
@@ -47,6 +61,9 @@ describe("IPC contracts", () => {
       testProviderCookie: "music-id3:test-provider-cookie",
       getProviderCookieStatus: "music-id3:get-provider-cookie-status",
       clearOnlineCache: "music-id3:clear-online-cache",
+      selectOrganizeDirectory: "music-id3:select-organize-directory",
+      prepareLibraryOrganization: "music-id3:prepare-library-organization",
+      executeLibraryOrganization: "music-id3:execute-library-organization",
       scanProgress: "music-id3:scan-progress"
     });
   });
@@ -89,7 +106,10 @@ describe("IPC contracts", () => {
       ipcChannels.setProviderCookie,
       ipcChannels.testProviderCookie,
       ipcChannels.getProviderCookieStatus,
-      ipcChannels.clearOnlineCache
+      ipcChannels.clearOnlineCache,
+      ipcChannels.selectOrganizeDirectory,
+      ipcChannels.prepareLibraryOrganization,
+      ipcChannels.executeLibraryOrganization
     ]);
     expect(registered).not.toContain(ipcChannels.scanProgress);
   });
@@ -293,5 +313,102 @@ describe("IPC contracts", () => {
     };
 
     await expect(handlers.get(ipcChannels.prepareCueSave)?.(event, draft)).rejects.toThrow();
+  });
+
+  it("requires an explicitly selected organization target", async () => {
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
+    const target = await createTempDir();
+    const audioPath = path.join(root, "track.flac");
+    await writeFile(audioPath, "audio");
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: false, filePaths: [root] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      scanLibrary: async (_root, onItem) => { onItem(scannedAudio(audioPath)); return { items: [scannedAudio(audioPath)], errors: [] }; },
+      readAudio: async () => scannedAudio(audioPath).metadata
+    });
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    await handlers.get(ipcChannels.scanDirectory)?.(event, root, "scan-request");
+
+    await expect(handlers.get(ipcChannels.prepareLibraryOrganization)?.(event, [audioPath], target)).rejects.toThrow(/choose the organize target/i);
+  });
+
+  it("rejects organization of a file not established by the current scan", async () => {
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
+    const target = await createTempDir();
+    const scannedPath = path.join(root, "scanned.flac");
+    const unscannedPath = path.join(root, "unscanned.flac");
+    await writeFile(scannedPath, "audio");
+    await writeFile(unscannedPath, "audio");
+    const dialogs = [root, target];
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: false, filePaths: [dialogs.shift()!] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      scanLibrary: async (_root, onItem) => { onItem(scannedAudio(scannedPath)); return { items: [scannedAudio(scannedPath)], errors: [] }; },
+      readAudio: async () => scannedAudio(scannedPath).metadata
+    });
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    await handlers.get(ipcChannels.scanDirectory)?.(event, root, "scan-request");
+    await handlers.get(ipcChannels.selectOrganizeDirectory)?.(event);
+
+    await expect(handlers.get(ipcChannels.prepareLibraryOrganization)?.(event, [unscannedPath], target)).rejects.toThrow(/current scan/i);
+  });
+
+  it("rejects organization of CUE-linked audio", async () => {
+    const handlers = new Map<string, Handler>();
+    const root = await createTempDir();
+    const target = await createTempDir();
+    const audioPath = path.join(root, "disc.flac");
+    await writeFile(audioPath, "audio");
+    const linked = scannedAudio(audioPath, { cuePath: path.join(root, "disc.cue") });
+    const dialogs = [root, target];
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: false, filePaths: [dialogs.shift()!] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      scanLibrary: async (_root, onItem) => { onItem(linked); return { items: [linked], errors: [] }; },
+      readAudio: async () => linked.metadata
+    });
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    await handlers.get(ipcChannels.scanDirectory)?.(event, root, "scan-request");
+    await handlers.get(ipcChannels.selectOrganizeDirectory)?.(event);
+
+    await expect(handlers.get(ipcChannels.prepareLibraryOrganization)?.(event, [audioPath], target)).rejects.toThrow(/CUE-linked/i);
+  });
+
+  it("invalidates an organization token when the renderer selects a new library root", async () => {
+    const handlers = new Map<string, Handler>();
+    const firstRoot = await createTempDir();
+    const target = await createTempDir();
+    const secondRoot = await createTempDir();
+    const audioPath = path.join(firstRoot, "track.flac");
+    await writeFile(audioPath, "audio");
+    const item = scannedAudio(audioPath);
+    const dialogs = [firstRoot, target, secondRoot];
+    registerIpcHandlers({
+      ipcMain: { handle(channel, listener) { handlers.set(channel, listener); } },
+      showOpenDialog: async () => ({ canceled: false, filePaths: [dialogs.shift()!] }),
+      cookieStore: { set: async () => undefined, redacted: async () => "unconfigured" },
+      scanLibrary: async (_root, onItem) => { onItem(item); return { items: [item], errors: [] }; },
+      readAudio: async () => item.metadata
+    });
+    const event = rendererEvent();
+    await approveRoot(handlers, event);
+    await handlers.get(ipcChannels.scanDirectory)?.(event, firstRoot, "scan-request");
+    await handlers.get(ipcChannels.selectOrganizeDirectory)?.(event);
+    const plan = await handlers.get(ipcChannels.prepareLibraryOrganization)?.(event, [audioPath], target) as { confirmationToken: string };
+    await handlers.get(ipcChannels.selectDirectory)?.(event);
+
+    await expect(handlers.get(ipcChannels.executeLibraryOrganization)?.(event, plan.confirmationToken)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/expired|invalid/i),
+      rolledBack: true
+    });
   });
 });

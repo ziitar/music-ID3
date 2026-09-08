@@ -18,6 +18,12 @@ function audioItem(overrides: Partial<Extract<LibraryItem, { kind: "audio" }>> =
   };
 }
 
+async function selectFirstCandidate(): Promise<HTMLElement> {
+  const [candidate] = await screen.findAllByTestId("metadata-candidate");
+  fireEvent.click(candidate);
+  return screen.findByTestId("candidate-comparison");
+}
+
 describe("library editing workflow", () => {
   let progressListener: ((progress: ScanProgress) => void) | undefined;
   beforeEach(() => {
@@ -38,6 +44,21 @@ describe("library editing workflow", () => {
       setProviderCookie: vi.fn(async () => undefined), testProviderCookie: vi.fn(async () => ({ ok: true, status: "configured" })),
       getProviderCookieStatus: vi.fn(async () => "unconfigured"),
       clearOnlineCache: vi.fn(async () => undefined),
+      selectOrganizeDirectory: vi.fn(async () => "D:/Organized"),
+      prepareLibraryOrganization: vi.fn(async (paths, targetRoot) => ({
+        confirmationToken: "organize-token",
+        targetRoot,
+        readyCount: paths.length,
+        unchangedCount: 0,
+        blockedCount: 0,
+        entries: paths.map((sourcePath) => ({
+          sourcePath,
+          targetPath: `${targetRoot}/Artist/Album/Old title.flac`,
+          relativePath: "Artist/Album/Old title.flac",
+          status: "ready" as const
+        }))
+      })),
+      executeLibraryOrganization: vi.fn(async () => ({ ok: true, moved: [], unchanged: [] })),
       onScanProgress: vi.fn((listener) => { progressListener = listener; return () => { progressListener = undefined; }; })
     };
   });
@@ -72,6 +93,63 @@ describe("library editing workflow", () => {
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() });
     expect(await screen.findByText("track.flac")).toBeInTheDocument();
     expect(screen.getByTestId("library-row")).toHaveTextContent("suspected");
+  });
+
+  it("allows directory organization only for complete standalone audio metadata", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/ready.flac", fileName: "ready.flac", wholeTrackStatus: "normal" }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/missing.flac", fileName: "missing.flac", metadata: { ...audioItem().metadata, common: { title: "Missing album", artist: "Artist" } }, wholeTrackStatus: "normal" }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 3, item: audioItem({ path: "D:/音乐/suspected.flac", fileName: "suspected.flac" }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 4, item: audioItem({ path: "D:/音乐/linked.flac", fileName: "linked.flac", wholeTrackStatus: "normal", cuePath: "D:/音乐/linked.cue" }) });
+
+    expect(await screen.findByRole("checkbox", { name: /select ready\.flac for organization/i })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: /select missing\.flac for organization/i })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /select suspected\.flac for organization/i })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /select linked\.flac for organization/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /select all tracks ready to organize/i }));
+    expect(libraryStore.getState().organizeSelection).toEqual(["D:/音乐/ready.flac"]);
+  });
+
+  it("previews and confirms the artist album title directory layout", async () => {
+    const sourcePath = "D:/音乐/ready.flac";
+    const destinationPath = "D:/Organized/Artist/Album/Old title.flac";
+    vi.mocked(window.musicId3.prepareLibraryOrganization).mockResolvedValue({
+      confirmationToken: "organize-token",
+      targetRoot: "D:/Organized",
+      readyCount: 1,
+      entries: [{ sourcePath, destinationPath, relativePath: "Artist/Album/Old title.flac", status: "ready" }]
+    });
+    vi.mocked(window.musicId3.executeLibraryOrganization).mockResolvedValue({
+      ok: true,
+      moved: [{ sourcePath, destinationPath }],
+      unchanged: []
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: sourcePath, fileName: "ready.flac", wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByRole("checkbox", { name: /select ready\.flac for organization/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: /choose target folder/i }));
+    await waitFor(() => expect(window.musicId3.selectOrganizeDirectory).toHaveBeenCalled());
+    expect(await screen.findByText("D:/Organized")).toBeInTheDocument();
+    expect(screen.getByText("Artist / Album / Old title.flac")).toBeInTheDocument();
+    const previewButton = screen.getByRole("button", { name: /preview organization/i });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(window.musicId3.prepareLibraryOrganization).toHaveBeenCalledWith([sourcePath], "D:/Organized"));
+    const dialog = await screen.findByRole("dialog", { name: /confirm file organization/i });
+    expect(dialog).toHaveTextContent("Artist/Album/Old title.flac");
+    fireEvent.click(within(dialog).getByRole("button", { name: /move 1 track/i }));
+
+    await waitFor(() => expect(window.musicId3.executeLibraryOrganization).toHaveBeenCalledWith("organize-token"));
+    expect(libraryStore.getState().items).toEqual([]);
+    expect(libraryStore.getState().organizeSelection).toEqual([]);
+    expect(await screen.findByText("Organized 1 tracks")).toBeInTheDocument();
   });
 
   it("guides suspected whole-track files to CUE flow and supports override", async () => {
@@ -125,8 +203,9 @@ describe("library editing workflow", () => {
     fireEvent.change(screen.getByLabelText(/title value/i), { target: { value: "New title" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /title/i }));
     fireEvent.click(screen.getByRole("button", { name: /preview diff/i }));
-    expect(screen.getByText(/old title/i)).toBeInTheDocument();
-    expect(screen.getByText(/new title/i)).toBeInTheDocument();
+    const diff = screen.getByTestId("metadata-diff");
+    expect(within(diff).getByText(/old title/i)).toBeInTheDocument();
+    expect(within(diff).getByText(/new title/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /write selected fields/i }));
     expect(window.musicId3.writeAudio).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /confirm write/i }));
@@ -213,7 +292,7 @@ describe("library editing workflow", () => {
     const generatedPath = "D:/音乐/track.flac.cue";
     vi.mocked(window.musicId3.saveCue).mockResolvedValue({ ok: true, path: generatedPath, backupPath: `${generatedPath}.bak` });
     vi.mocked(window.musicId3.readCue).mockResolvedValue({ path: generatedPath, encoding: "utf8", rawText: 'TITLE "Generated"', parsed: { title: "Generated", remarks: [], files: [{ path: "track.flac" }], tracks: [{ number: 1, indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [] }, referencedFiles: ["D:/音乐/track.flac"], missingReferencedFiles: [] });
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /save cue/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm cue save/i }));
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /save cue/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm cue save/i }));
 
     await waitFor(() => expect(window.musicId3.readCue).toHaveBeenCalledWith(generatedPath));
     expect(libraryStore.getState()).toMatchObject({ selectedPath: generatedPath, items: expect.arrayContaining([expect.objectContaining({ kind: "cue", path: generatedPath })]) });
@@ -225,7 +304,7 @@ describe("library editing workflow", () => {
     let resolveSave!: (value: Awaited<ReturnType<typeof window.musicId3.saveCue>>) => void;
     vi.mocked(window.musicId3.saveCue).mockImplementation(() => new Promise((resolve) => { resolveSave = resolve; }));
     vi.mocked(window.musicId3.selectDirectory).mockResolvedValueOnce("D:/音乐").mockResolvedValueOnce("D:/new");
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledTimes(1)); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /save cue/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm cue save/i }));
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledTimes(1)); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /save cue/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm cue save/i }));
     fireEvent.click(screen.getByRole("button", { name: /scan folder/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledTimes(2)); resolveSave({ ok: true, path: "D:/音乐/track.flac.cue", backupPath: "D:/音乐/track.flac.cue.bak" }); await Promise.resolve(); await Promise.resolve();
 
     expect(window.musicId3.readCue).not.toHaveBeenCalled();
@@ -237,11 +316,61 @@ describe("library editing workflow", () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
     fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    expect(await screen.findByText("New title")).toBeInTheDocument(); fireEvent.click(screen.getByRole("button", { name: /apply candidate/i }));
+    expect(await screen.findByText("New title")).toBeInTheDocument(); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
     await screen.findByRole("button", { name: /confirm candidate write/i }); expect(screen.getAllByText(/old title/i).length).toBeGreaterThan(0); fireEvent.click(screen.getByRole("button", { name: /confirm candidate write/i }));
     await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: expect.objectContaining({ title: "New title", artist: "Artist" }), selectedFields: expect.arrayContaining(["title", "artist"]) })));
     expect(window.musicId3.readAudio).toHaveBeenCalledWith("D:/音乐/track.flac");
     await waitFor(() => expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument());
+  });
+
+  it("switches the active candidate when the card deck is swiped", async () => {
+    const candidates = [
+      { id: "one", source: "musicbrainz" as const, title: "First card", artist: "Artist one", confidence: "high" as const },
+      { id: "two", source: "musicbrainz" as const, title: "Second card", artist: "Artist two", confidence: "medium" as const },
+      { id: "three", source: "musicbrainz" as const, title: "Third card", artist: "Artist three", confidence: "low" as const }
+    ];
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue(candidates);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockImplementation(async (_source, id) => candidates.find((candidate) => candidate.id === id)!);
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "cards" } });
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+
+    const cards = await screen.findAllByTestId("metadata-candidate");
+    const deck = screen.getByRole("group", { name: /candidate results/i });
+    Object.assign(deck, { hasPointerCapture: vi.fn(() => false), setPointerCapture: vi.fn() });
+    expect(cards[0]).toHaveAttribute("aria-pressed", "true");
+    fireEvent.pointerDown(deck, { clientX: 180, pointerId: 1 });
+    fireEvent.pointerMove(deck, { clientX: 90, pointerId: 1 });
+    fireEvent.pointerUp(deck, { clientX: 90, pointerId: 1 });
+
+    await waitFor(() => expect(cards[1]).toHaveAttribute("aria-pressed", "true"));
+    expect(await screen.findByTestId("candidate-comparison")).toHaveTextContent("Second card");
+  });
+
+  it("does not switch candidate cards when the page is scrolled", async () => {
+    const candidates = [
+      { id: "one", source: "musicbrainz" as const, title: "First card", confidence: "high" as const },
+      { id: "two", source: "musicbrainz" as const, title: "Second card", confidence: "medium" as const }
+    ];
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue(candidates);
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "cards" } });
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+
+    const cards = await screen.findAllByTestId("metadata-candidate");
+    fireEvent.wheel(screen.getByRole("group", { name: /candidate results/i }), { deltaY: 120 });
+
+    expect(cards[0]).toHaveAttribute("aria-pressed", "true");
+    expect(cards[1]).toHaveAttribute("aria-pressed", "false");
+    expect(window.musicId3.getMetadataCandidate).not.toHaveBeenCalled();
   });
 
   it("puts duration first and transfers expanded metadata field by field", async () => {
@@ -274,7 +403,7 @@ describe("library editing workflow", () => {
     expect(comparison).toHaveTextContent("Not provided");
 
     fireEvent.click(within(comparison).getByRole("button", { name: /transfer album artist/i }));
-    fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i }));
+    fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
     expect(await screen.findByRole("dialog")).toHaveTextContent("Cloud album artist");
   });
 
@@ -283,13 +412,11 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValueOnce({ id: "detail", source: "musicbrainz", title: "Detailed title", date: "2026", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" }).mockRejectedValueOnce(new Error("second cover request failed"));
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "detail" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
     await screen.findByText("Search title");
-    const candidateRow = screen.getByRole("button", { name: /load candidate details/i }).closest(".candidate-row") as HTMLElement;
-    expect(within(candidateRow).getByRole("checkbox", { name: /cover/i })).toBeDisabled();
-    fireEvent.click(within(candidateRow).getByRole("button", { name: /load candidate details/i }));
-    await waitFor(() => expect(within(candidateRow).getByRole("checkbox", { name: /cover/i })).toBeEnabled());
-    expect(within(candidateRow).getByRole("checkbox", { name: /date/i })).toBeEnabled();
-    fireEvent.click(within(candidateRow).getByRole("checkbox", { name: /cover/i }));
-    fireEvent.click(within(candidateRow).getByRole("button", { name: /apply candidate/i }));
+    const comparison = await selectFirstCandidate();
+    await waitFor(() => expect(within(comparison).getByRole("button", { name: /transfer cover/i })).toBeEnabled());
+    expect(within(comparison).getByRole("button", { name: /transfer date/i })).toBeEnabled();
+    fireEvent.click(within(comparison).getByRole("button", { name: /transfer cover/i }));
+    fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
     expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledTimes(1);
     fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
     await waitFor(() => expect(window.musicId3.writeAudio).toHaveBeenCalledWith("D:/音乐/track.flac", expect.objectContaining({ fields: expect.objectContaining({ cover: { mimeType: "image/jpeg", data: "AQID" } }), selectedFields: expect.arrayContaining(["cover"]) })));
@@ -302,7 +429,7 @@ describe("library editing workflow", () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/a.flac", fileName: "a.flac", wholeTrackStatus: "normal" }) });
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/b.flac", fileName: "b.flac", metadata: { ...audioItem().metadata, common: { title: "B title" } }, wholeTrackStatus: "normal" }) });
-    fireEvent.click(await screen.findByText("a.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "A" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
+    fireEvent.click(await screen.findByText("a.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "A" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
     fireEvent.click(screen.getByText("b.flac"));
     resolveWrite({ ok: true, metadata: { common: { title: "Written A" }, raw: {}, durationMs: 1 } });
 
@@ -318,7 +445,7 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.readAudio).mockRejectedValue(new Error("refresh failed"));
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/a.flac", fileName: "a.flac", wholeTrackStatus: "normal" }) }); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/b.flac", fileName: "b.flac", metadata: { ...audioItem().metadata, common: { title: "B title" } }, wholeTrackStatus: "normal" }) });
-    fireEvent.click(await screen.findByText("a.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "A" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i })); fireEvent.click(screen.getByText("b.flac")); resolveWrite({ ok: true, metadata: { common: { title: "Written A" }, raw: {}, durationMs: 1 } });
+    fireEvent.click(await screen.findByText("a.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "A" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i })); fireEvent.click(screen.getByText("b.flac")); resolveWrite({ ok: true, metadata: { common: { title: "Written A" }, raw: {}, durationMs: 1 } });
 
     await waitFor(() => expect(window.musicId3.readAudio).toHaveBeenCalledWith("D:/音乐/a.flac"));
     expect(libraryStore.getState().items.find((item) => item.path.endsWith("a.flac"))).toMatchObject({ metadata: { common: { title: "Written A" } } });
@@ -333,7 +460,7 @@ describe("library editing workflow", () => {
     fireEvent.click(await screen.findByText("track.flac"));
     fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "details" } });
     fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /load candidate details/i }));
+    await selectFirstCandidate();
 
     await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByRole("button", { name: /load candidate details/i })).not.toBeInTheDocument());
@@ -351,7 +478,8 @@ describe("library editing workflow", () => {
       fireEvent.click(await screen.findByText("track.flac"));
       fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "candidate" } });
       fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-      fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i }));
+      const comparison = await selectFirstCandidate();
+      fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
       await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalled());
 
       view.unmount();
@@ -382,7 +510,7 @@ describe("library editing workflow", () => {
   });
 
   it("invalidates candidate confirmation on same-path editor replacement", async () => {
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); await screen.findByRole("button", { name: /confirm candidate write/i });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i })); await screen.findByRole("button", { name: /confirm candidate write/i });
 
     act(() => editorStore.setItem(audioItem({ metadata: { ...audioItem().metadata, common: { title: "Replacement" } }, wholeTrackStatus: "normal" })));
 
@@ -458,10 +586,10 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValueOnce([{ ...summaryResult }]).mockResolvedValueOnce([{ ...summaryResult }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ ...summaryResult, cover: { mimeType: "image/jpeg", data: "AQID" } });
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "same" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /load candidate details/i })); await waitFor(() => expect(screen.queryByRole("button", { name: /load candidate details/i })).not.toBeInTheDocument());
+    await selectFirstCandidate(); await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    expect(await screen.findByRole("button", { name: /load candidate details/i })).toBeInTheDocument();
-    expect(screen.getAllByRole("checkbox", { name: /cover/i }).at(-1)).toBeDisabled();
+    await selectFirstCandidate();
+    await waitFor(() => expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledTimes(2));
   });
 
   it("offers only providers relevant to the selected item type", async () => {
@@ -481,14 +609,15 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValueOnce([{ id: "with-cover", source: "musicbrainz", title: "With cover", confidence: "high" }]).mockResolvedValueOnce([{ id: "without-cover", source: "musicbrainz", title: "Without cover", confidence: "high" }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "with-cover", source: "musicbrainz", title: "With cover", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" });
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "candidate" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    const firstRow = (await screen.findByText("With cover")).closest(".candidate-row") as HTMLElement;
-    fireEvent.click(within(firstRow).getByRole("button", { name: /load candidate details/i }));
-    await waitFor(() => expect(within(firstRow).getByRole("checkbox", { name: /cover/i })).toBeEnabled());
-    fireEvent.click(within(firstRow).getByRole("checkbox", { name: /title/i }));
-    fireEvent.click(within(firstRow).getByRole("checkbox", { name: /cover/i }));
+    await screen.findByText("With cover");
+    const firstComparison = await selectFirstCandidate();
+    await waitFor(() => expect(within(firstComparison).getByRole("button", { name: /transfer cover/i })).toBeEnabled());
+    fireEvent.click(within(firstComparison).getByRole("button", { name: /transfer title/i }));
+    fireEvent.click(within(firstComparison).getByRole("button", { name: /transfer cover/i }));
     fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    const secondRow = (await screen.findByText("Without cover")).closest(".candidate-row") as HTMLElement;
-    expect(within(secondRow).getByRole("button", { name: /apply candidate/i })).toBeDisabled();
+    await screen.findByText("Without cover");
+    const secondComparison = await selectFirstCandidate();
+    expect(within(secondComparison).getByRole("button", { name: /overwrite selected fields/i })).toBeDisabled();
   });
 
   it("keeps candidate confirmation open and does not refresh after a rejected write", async () => {
@@ -496,7 +625,7 @@ describe("library editing workflow", () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
     fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "New" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
+    const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
 
     expect(await screen.findByText("Write rejected")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument();
@@ -596,7 +725,7 @@ describe("library editing workflow", () => {
   it("opens a MusicBrainz release as a CUE draft for a suspected whole-track", async () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", trackCount: 1, confidence: "low" }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", offsets: [150], tracks: [{ number: 1, title: "First" }], confidence: "high", cover: { mimeType: "image/jpeg", data: "AQID" } });
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); await screen.findByText("Candidate release"); fireEvent.click(screen.getByRole("button", { name: /apply candidate/i }));
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); await screen.findByText("Candidate release"); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i }));
     expect(await screen.findByDisplayValue("Candidate release")).toBeInTheDocument(); expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledWith("musicbrainz", "release", expect.objectContaining({ title: "Old title", artist: "Artist", durationMs: 215_000 })); expect(window.musicId3.buildCandidateCue).toHaveBeenCalledWith(expect.objectContaining({ audioPath: "D:/音乐/track.flac", candidate: expect.objectContaining({ offsets: [150] }) })); expect(screen.getByText(/musicbrainz release/i)).toBeInTheDocument(); expect(screen.getByAltText("candidate cover")).toBeInTheDocument();
   });
 
@@ -604,7 +733,7 @@ describe("library editing workflow", () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "release", releaseId: "release", mediumPosition: 2, source: "musicbrainz", title: "Candidate release", artist: "Artist", trackCount: 1, confidence: "low" }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "release", releaseId: "release", source: "musicbrainz", title: "Candidate release", artist: "Artist", discId: "disc-2", offsets: [150], tracks: [{ number: 1, title: "First" }], confidence: "low", evidence: ["Track count matched"] });
     vi.mocked(window.musicId3.buildCandidateCue).mockResolvedValue({ title: "Candidate release", performer: "Artist", remarks: [], files: [{ path: "track.flac", type: "WAVE" }], tracks: [{ number: 1, title: "First", indexes: [{ number: 1, time: "00:00:00" }] }], unknownLines: [], provenance: { source: "musicbrainz", releaseId: "release", discId: "disc-2", confidence: "low", evidence: ["Track count matched"], inferred: true } });
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "Candidate release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); fireEvent.click(await screen.findByRole("button", { name: /apply candidate/i }));
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "Candidate release" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i })); const comparison = await selectFirstCandidate(); fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i }));
 
     expect(await screen.findByText(/release id: release/i)).toBeInTheDocument();
     expect(screen.getByText(/disc id: disc-2/i)).toBeInTheDocument();

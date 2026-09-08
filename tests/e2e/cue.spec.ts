@@ -48,9 +48,9 @@ test("catches a whole-track MusicBrainz match being written to audio instead of 
   await page.getByLabel("candidate query").fill("Miles Davis Kind of Blue");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const candidate = page.getByTestId("metadata-candidate").filter({ hasText: "Kind of Blue" });
-  await candidate.getByRole("button", { name: "Load candidate details" }).click();
+  await candidate.click();
   await expect(candidate.getByAltText("candidate cover")).toBeVisible();
-  await candidate.getByRole("button", { name: "Apply candidate" }).click();
+  await page.getByTestId("candidate-comparison").getByRole("button", { name: "Apply candidate" }).click();
   await expect(page.getByText("Source: musicbrainz release", { exact: false })).toBeVisible();
   await expect(page.getByLabel("cue album title")).toHaveValue("Kind of Blue");
   await expect(page.getByLabel("track 1 title")).toHaveValue("So What");

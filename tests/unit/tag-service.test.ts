@@ -165,7 +165,7 @@ describe("tag service", () => {
       tagTypes: TagTypes.Apple,
       title: "Still readable",
       performers: [],
-      albumArtists: [],
+      albumArtists: ["First album artist", "Second album artist"],
       album: undefined,
       track: 0,
       trackCount: 0,
@@ -184,7 +184,10 @@ describe("tag service", () => {
     const metadata = await serviceForTag(apple).readAudioMetadata("fixture.m4a");
 
     expect(metadata).toEqual(expect.objectContaining({
-      common: expect.objectContaining({ title: "Still readable" }),
+      common: expect.objectContaining({
+        title: "Still readable",
+        albumArtist: "First album artist / Second album artist"
+      }),
       raw: {},
       durationMs: 12
     }));

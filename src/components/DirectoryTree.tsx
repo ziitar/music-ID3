@@ -35,7 +35,7 @@ function directoryNodes(root: string, paths: string[]): DirectoryNode[] {
 
 function DirectoryBranch({ nodes, selected, select }: { nodes: DirectoryNode[]; selected?: string; select: (path: string) => void }) {
   return <ul className="directory-children">{nodes.map((node) => <li key={node.path}>
-    <button aria-pressed={selected === node.path} onClick={() => select(node.path)}>{node.name}</button>
+    <button aria-pressed={selected === node.path} onClick={() => select(node.path)}><Folder aria-hidden="true" /><span>{node.name}</span></button>
     {node.children.length > 0 && <DirectoryBranch nodes={node.children} selected={selected} select={select} />}
   </li>)}</ul>;
 }
@@ -50,11 +50,12 @@ export function DirectoryTree() {
   const select = (directory?: string) => { editorStore.setItem(undefined); libraryStore.setCurrentDirectory(directory); };
   const nodes = root ? directoryNodes(root, items.map((item) => item.path)) : [];
   return <aside className="pane directory-pane" aria-label={t("directories")}>
-    <h2>{t("directories")}</h2>
-    <button className="toolbar-button" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}>{t("chooseFolder")}</button>
+    <div className="pane-toolbar"><div><FolderTree aria-hidden="true" /><h2>{t("directories")}</h2></div></div>
+    <button className="directory-picker secondary-action" onClick={() => { editorStore.setItem(undefined); void libraryStore.selectRoot(); }}><FolderOpen aria-hidden="true" />{t("chooseFolder")}</button>
     <div className="directory-root" data-testid="directory-root">{root ?? t("noFolderSelected")}</div>
-    {root && <nav aria-label={t("libraryDirectories")}><button aria-pressed={!currentDirectory} onClick={() => select(undefined)}>{t("allFiles")}</button><DirectoryBranch nodes={nodes} selected={currentDirectory} select={select} /></nav>}
-    {scanning && <div role="status" data-testid="scan-progress">{t("scanning")} <button onClick={() => window.dispatchEvent(new Event("music-id3:cancel-scan"))}>{t("cancel")}</button></div>}
+    {root && <nav aria-label={t("libraryDirectories")}><button aria-pressed={!currentDirectory} onClick={() => select(undefined)}><LibraryBig aria-hidden="true" /><span>{t("allFiles")}</span><small>{items.length}</small></button><DirectoryBranch nodes={nodes} selected={currentDirectory} select={select} /></nav>}
+    {scanning && <div role="status" className="scan-status" data-testid="scan-progress"><LoaderCircle className="spin" aria-hidden="true" /><span>{t("scanning")}</span><button className="icon-button" aria-label={t("cancel")} onClick={() => window.dispatchEvent(new Event("music-id3:cancel-scan"))}><X aria-hidden="true" /></button></div>}
     {error && <p className="error-text">{translateMessage(error)}</p>}
   </aside>;
 }
+import { Folder, FolderOpen, FolderTree, LibraryBig, LoaderCircle, X } from "lucide-react";
