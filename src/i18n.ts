@@ -118,7 +118,22 @@ const en = {
   confidenceHigh: "high",
   confidenceMedium: "medium",
   confidenceLow: "low",
-  confidenceUnverified: "unverified"
+  confidenceUnverified: "unverified",
+  candidateResults: "Candidate results",
+  durationPrimaryHint: "Duration is the primary source-match signal",
+  localDuration: "Local duration",
+  cloudDuration: "Cloud duration",
+  durationClose: "Likely same source",
+  durationReview: "Review duration",
+  durationDifferent: "Likely different source",
+  durationUnknown: "No duration",
+  durationDelta: "Δ {seconds}s",
+  localMetadata: "Local metadata",
+  cloudMetadata: "Cloud metadata",
+  transfer: "Transfer",
+  notProvided: "Not provided",
+  transferField: "Transfer {field} from cloud",
+  selectedFieldCount: "{count} fields selected"
 } as const;
 
 type MessageKey = keyof typeof en;
@@ -237,7 +252,22 @@ const zh = {
   confidenceHigh: "高",
   confidenceMedium: "中",
   confidenceLow: "低",
-  confidenceUnverified: "未验证"
+  confidenceUnverified: "未验证",
+  candidateResults: "候选结果",
+  durationPrimaryHint: "优先使用时长判断本地音乐与云端音乐是否同源",
+  localDuration: "本地时长",
+  cloudDuration: "云端时长",
+  durationClose: "疑似同源",
+  durationReview: "时长需核对",
+  durationDifferent: "疑似不同源",
+  durationUnknown: "无时长信息",
+  durationDelta: "相差 {seconds} 秒",
+  localMetadata: "本地信息",
+  cloudMetadata: "云端信息",
+  transfer: "覆盖写入",
+  notProvided: "未提供",
+  transferField: "用云端{field}覆盖本地",
+  selectedFieldCount: "已选择 {count} 个字段"
 } satisfies Record<MessageKey, string>;
 
 const knownChineseMessages: Record<string, string> = {
@@ -278,6 +308,8 @@ const knownChineseMessages: Record<string, string> = {
   "QQ Music song result": "QQ 音乐歌曲结果",
   "NetEase song result": "网易云音乐歌曲结果",
   "Track count matched": "音轨数量匹配",
+  "Total duration matched": "总时长匹配",
+  "Total duration differed": "总时长差异明显",
   "musicbrainz release": "MusicBrainz 发行版本"
 };
 

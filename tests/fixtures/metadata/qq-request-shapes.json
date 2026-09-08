@@ -1,29 +1,15 @@
 {
   "search": {
-    "host": "c.y.qq.com",
-    "referer": "https://c.y.qq.com/",
-    "params": {
-      "g_tk": "1124214810",
-      "loginUin": "12345",
-      "hostUin": "0",
-      "inCharset": "utf8",
-      "outCharset": "utf-8",
-      "notice": "0",
-      "platform": "yqq.json",
-      "needNewCode": "0",
-      "w": "Mojito",
-      "format": "json",
-      "ct": "24",
-      "qqmusic_ver": "1298",
-      "remoteplace": "txt.yqq.song",
-      "t": "0",
-      "aggr": "1",
-      "cr": "1",
-      "lossless": "0",
-      "flag_qc": "0",
-      "n": "10",
-      "p": "1",
-      "catZhida": "1"
+    "host": "u.y.qq.com",
+    "referer": "https://y.qq.com/n/ryqq/search",
+    "contentType": "application/json",
+    "body": {
+      "comm": { "ct": 24, "cv": 0, "uin": "12345" },
+      "req_1": {
+        "method": "DoSearchForQQMusicDesktop",
+        "module": "music.search.SearchCgiService",
+        "param": { "grp": 1, "num_per_page": 10, "page_num": 1, "query": "Mojito", "search_type": 0 }
+      }
     }
   },
   "detail": {

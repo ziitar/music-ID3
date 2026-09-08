@@ -2,6 +2,7 @@ appId: com.musicid3.desktop
 productName: Music ID3
 directories:
   output: release
+electronDist: node_modules/electron/dist
 files:
   - dist/**/*
   - package.json

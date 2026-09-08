@@ -136,8 +136,18 @@ export type MetadataCandidate = {
   source: MetadataSource;
   title: string;
   artist?: string;
+  albumArtist?: string;
   album?: string;
+  trackNumber?: number;
+  trackTotal?: number;
+  discNumber?: number;
+  discTotal?: number;
   date?: string;
+  genre?: string;
+  composer?: string;
+  comment?: string;
+  lyrics?: string;
+  copyright?: string;
   trackCount?: number;
   tracks?: Array<{ number: number; title: string; artist?: string; durationMs?: number }>;
   cover?: CoverArt;

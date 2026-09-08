@@ -77,14 +77,9 @@ async function providerServer(): Promise<ProviderFixture> {
       response.end(neteaseDetail);
       return;
     }
-    if (original.includes("c.y.qq.com/soso/fcgi-bin/client_search_cp")) {
-      response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(qqSearch);
-      return;
-    }
     if (original.includes("u.y.qq.com/cgi-bin/musicu.fcg")) {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(qqDetail);
+      response.end(original.includes("data=") ? qqDetail : qqSearch);
       return;
     }
     if (original.includes("p1.music.126.net/") || original.includes("y.gtimg.cn/") || original.endsWith(".jpg")) {

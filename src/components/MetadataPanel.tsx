@@ -50,7 +50,7 @@ export function MetadataPanel() {
 
   if (!item) return <aside className="pane details-pane" aria-label={t("details")}><h2>{t("details")}</h2><p className="empty-state">{t("selectFile")}</p></aside>;
   const candidateCueItem = cueDraft ? { kind: "cue" as const, path: item.kind === "cue" ? item.path : `${item.path}.cue`, encoding: item.kind === "cue" ? item.encoding : "utf8-bom" as const, rawText: "", parsed: cueDraft, referencedFiles: item.kind === "cue" ? item.referencedFiles : [item.path], missingReferencedFiles: [] } : undefined;
-  if (item.kind === "cue") return <aside className="pane details-pane" aria-label={t("details")}><CueEditor key={`${item.path}:${candidateCueItem ? "candidate" : "local"}`} item={candidateCueItem ?? item} source={candidateCueItem ? state.candidateSource : undefined} /><MetadataCandidates /></aside>;
+  if (item.kind === "cue") return <aside className="pane details-pane" aria-label={t("details")}><MetadataCandidates /><CueEditor key={`${item.path}:${candidateCueItem ? "candidate" : "local"}`} item={candidateCueItem ?? item} source={candidateCueItem ? state.candidateSource : undefined} /></aside>;
 
   const fields = [
     { name: "title", numeric: false }, { name: "artist", numeric: false }, { name: "album", numeric: false },
@@ -112,6 +112,7 @@ export function MetadataPanel() {
   return <aside className="pane details-pane" aria-label={t("details")}>
     <h2>{t("details")}</h2><h3 data-testid="details-file-name">{item.fileName}</h3>{error && <p className="error-text" role="alert">{translateMessage(error)}</p>}
     {suspected && <div className="guidance"><p>{t("suspectedCue")}</p><button onClick={() => window.dispatchEvent(new CustomEvent("music-id3:override", { detail: item.path }))}>{t("normalAudioEditing")}</button></div>}
+    <MetadataCandidates />
     {candidateCueItem && <CueEditor key="candidate-cue" item={candidateCueItem} source={state.candidateSource} />}
     <div className="mode-tabs"><button aria-pressed={mode === "common"} onClick={() => setMode("common")}>{t("commonTags")}</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>{t("rawTags")}</button></div>
     {mode === "raw" ? <pre className="raw-tags" aria-label={t("rawTagsReadOnly")} data-testid="raw-tags">{JSON.stringify(item.metadata.raw, null, 2)}</pre> : <>
@@ -122,6 +123,5 @@ export function MetadataPanel() {
     </>}
     {coverConfirmationCurrent && coverConfirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>{t("clearCoverQuestion")}</p><button onClick={() => { if (!isCoverConfirmationCurrent(coverConfirm)) { setCoverConfirm(undefined); return; } abortCoverRead(); selectCover(undefined); setCoverConfirm(undefined); }}>{t("confirmClear")}</button><button onClick={() => setCoverConfirm(undefined)}>{t("cancel")}</button></div></div>}
     {confirmationCurrent && confirm && <div role="dialog" className="confirm-dialog"><div className="dialog-body"><p>{t("confirmWriteQuestion")}</p><button aria-label={t("confirmWrite")} onClick={() => void write(confirm)}>{t("confirmWrite")}</button><button onClick={() => setConfirm(undefined)}>{t("cancel")}</button></div></div>}
-    <MetadataCandidates />
   </aside>;
 }

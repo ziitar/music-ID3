@@ -244,6 +244,40 @@ describe("library editing workflow", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /confirm candidate write/i })).not.toBeInTheDocument());
   });
 
+  it("puts duration first and transfers expanded metadata field by field", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{
+      id: "duration-match", source: "qq", title: "Cloud title", artist: "Cloud artist",
+      album: "Cloud album", albumArtist: "Cloud album artist", trackNumber: 3, trackTotal: 12,
+      discNumber: 1, discTotal: 2, date: "2024-03-01", totalDurationMs: 216_200, confidence: "medium"
+    }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockImplementation(async (_source, id) => ({
+      id, source: "qq", title: "Cloud title", artist: "Cloud artist", album: "Cloud album",
+      albumArtist: "Cloud album artist", trackNumber: 3, trackTotal: 12, discNumber: 1, discTotal: 2,
+      date: "2024-03-01", totalDurationMs: 216_200, confidence: "medium"
+    }));
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "Cloud title" } });
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    fireEvent.click(await screen.findByText("Cloud title"));
+
+    const comparison = screen.getByTestId("candidate-comparison");
+    expect(comparison).toHaveTextContent("Local duration");
+    expect(comparison).toHaveTextContent("3:35");
+    expect(comparison).toHaveTextContent("3:36");
+    expect(comparison).toHaveTextContent("Likely same source");
+    expect(comparison).toHaveTextContent("Δ 1.2s");
+    expect(comparison).toHaveTextContent("Cloud album artist");
+    expect(comparison).toHaveTextContent("Not provided");
+
+    fireEvent.click(within(comparison).getByRole("button", { name: /transfer album artist/i }));
+    fireEvent.click(within(comparison).getByRole("button", { name: /apply candidate/i }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Cloud album artist");
+  });
+
   it("loads detailed candidate fields before applying selected cover art", async () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "detail", source: "musicbrainz", title: "Search title", confidence: "medium" }]);
     vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValueOnce({ id: "detail", source: "musicbrainz", title: "Detailed title", date: "2026", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" }).mockRejectedValueOnce(new Error("second cover request failed"));

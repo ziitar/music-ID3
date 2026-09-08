@@ -8,7 +8,13 @@
         "mid": "0039MnYb0qxYhV",
         "name": "Mojito",
         "interval": 185,
-        "album": { "id": 15163534, "mid": "0016l2F430zMux", "name": "Mojito" },
+        "index_album": 1,
+        "index_cd": 1,
+        "songnum": 1,
+        "time_public": "2020-06-12",
+        "genre": "Pop",
+        "composer": [{ "name": "Jay Chou" }],
+        "album": { "id": 15163534, "mid": "0016l2F430zMux", "name": "Mojito", "singer": [{ "name": "Jay Chou" }] },
         "singer": [{ "id": 4558, "mid": "0025NhlN2yWrP4", "name": "Jay Chou" }]
       }
     }

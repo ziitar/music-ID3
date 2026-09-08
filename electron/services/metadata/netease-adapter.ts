@@ -11,8 +11,15 @@ type NeteaseSong = {
   dt?: number;
   artists?: Array<{ name?: string }>;
   ar?: Array<{ name?: string }>;
-  album?: { name?: string; picUrl?: string };
-  al?: { name?: string; picUrl?: string };
+  album?: { name?: string; picUrl?: string; artists?: Array<{ name?: string }>; publishTime?: number };
+  al?: { name?: string; picUrl?: string; artists?: Array<{ name?: string }>; publishTime?: number };
+  no?: number;
+  cd?: string;
+  publishTime?: number;
+  genre?: string;
+  composer?: string;
+  lyrics?: string;
+  comment?: string;
 };
 
 const musicDomain = "https://music.163.com";
@@ -80,12 +87,23 @@ function safeCoverUrl(value: string): string {
 function mapSong(song: NeteaseSong): MetadataCandidate {
   const artists = song.artists ?? song.ar ?? [];
   const album = song.album ?? song.al;
+  const albumArtists = album?.artists?.map((artist) => artist.name).filter(Boolean).join(" / ");
+  const publishedAt = song.publishTime ?? album?.publishTime;
+  const discNumber = Number.parseInt(song.cd ?? "", 10);
   return {
     id: String(song.id),
     source: "netease",
     title: song.name ?? `Song ${song.id}`,
     artist: artists.map((artist) => artist.name).filter(Boolean).join(" / ") || undefined,
+    albumArtist: albumArtists || undefined,
     album: album?.name,
+    trackNumber: song.no,
+    discNumber: Number.isFinite(discNumber) ? discNumber : undefined,
+    date: publishedAt ? String(new Date(publishedAt).getUTCFullYear()) : undefined,
+    genre: song.genre,
+    composer: song.composer,
+    lyrics: song.lyrics,
+    comment: song.comment,
     totalDurationMs: song.duration ?? song.dt,
     coverUrl: album?.picUrl,
     confidence: "low",

@@ -13,8 +13,27 @@ type QqSong = {
   interval?: number;
   albummid?: string;
   albumname?: string;
-  album?: { mid?: string; name?: string };
+  album?: { mid?: string; name?: string; singer?: Array<{ name?: string }> };
   singer?: Array<{ name?: string }>;
+  index_album?: number;
+  index_cd?: number;
+  songnum?: number;
+  time_public?: string;
+  genre?: string;
+  composer?: Array<{ name?: string }> | string;
+  lyric?: string;
+  desc?: string;
+};
+
+type QqSearchResponse = {
+  code?: number;
+  req_1?: {
+    code?: number;
+    data?: {
+      code?: number;
+      body?: { song?: { list?: QqSong[] } };
+    };
+  };
 };
 
 const sessionCacheTtlMs = 5 * 60 * 1000;
@@ -63,12 +82,25 @@ function safeCoverUrl(value: string): string {
 function mapSong(song: QqSong): MetadataCandidate {
   const id = song.songmid ?? song.mid ?? song.songid ?? song.id;
   const albumMid = song.albummid ?? song.album?.mid;
+  const albumArtist = song.album?.singer?.map((artist) => artist.name).filter(Boolean).join(" / ");
+  const composer = Array.isArray(song.composer)
+    ? song.composer.map((artist) => artist.name).filter(Boolean).join(" / ")
+    : song.composer;
   return {
     id: String(id ?? ""),
     source: "qq",
     title: song.songname ?? song.name ?? `Song ${id ?? ""}`,
     artist: song.singer?.map((artist) => artist.name).filter(Boolean).join(" / ") || undefined,
+    albumArtist: albumArtist || undefined,
     album: song.albumname ?? song.album?.name,
+    trackNumber: song.index_album,
+    trackTotal: song.songnum,
+    discNumber: song.index_cd,
+    date: song.time_public,
+    genre: song.genre,
+    composer: composer || undefined,
+    lyrics: song.lyric,
+    comment: song.desc,
     totalDurationMs: song.interval !== undefined ? song.interval * 1000 : undefined,
     coverUrl: coverUrl(albumMid),
     confidence: "low",
@@ -82,8 +114,9 @@ export function createQqMusicAdapter(options: {
 }): MetadataAdapter {
   function requestOptions(
     cacheKey: string,
-    prepare: (cookie: string | undefined) => { url: string; headers: Record<string, string> },
-    referrer: string
+    prepare: (cookie: string | undefined) => { url: string; headers: Record<string, string>; body?: string },
+    referrer: string,
+    cacheTtlMs = sessionCacheTtlMs
   ): HttpRequestOptions {
     return {
       headers: { Accept: "application/json" },
@@ -96,38 +129,36 @@ export function createQqMusicAdapter(options: {
           headers: { ...prepared.headers, ...(cookie ? { Cookie: cookie } : {}) }
         };
       },
-      cacheTtlMs: sessionCacheTtlMs,
+      cacheTtlMs,
       cacheKey
     };
   }
 
-  async function search(query: string): Promise<MetadataCandidate[]> {
-    const baseUrl = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp";
-    const result = await options.http.getJson<{
-      data?: { song?: { list?: QqSong[] }; songlist?: QqSong[] };
-    }>("qq", baseUrl, requestOptions(`qq:search:${query}`, (cookie) => {
-      const params = new URLSearchParams({
-        ...commonParams(cookie),
-        w: query,
-        format: "json",
-        ct: "24",
-        qqmusic_ver: "1298",
-        remoteplace: "txt.yqq.song",
-        t: "0",
-        aggr: "1",
-        cr: "1",
-        lossless: "0",
-        flag_qc: "0",
-        n: "10",
-        p: "1",
-        catZhida: "1"
+  async function search(query: string, cacheTtlMs = sessionCacheTtlMs): Promise<MetadataCandidate[]> {
+    const baseUrl = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+    const result = await options.http.postJson<QqSearchResponse>("qq", baseUrl, requestOptions(`qq:search:${query}`, (cookie) => {
+      const values = cookieValues(cookie);
+      const body = JSON.stringify({
+        comm: { ct: 24, cv: 0, uin: values.uin ?? "0" },
+        req_1: {
+          method: "DoSearchForQQMusicDesktop",
+          module: "music.search.SearchCgiService",
+          param: { grp: 1, num_per_page: 10, page_num: 1, query, search_type: 0 }
+        }
       });
       return {
-        url: `${baseUrl}?${params}`,
-        headers: {}
+        url: baseUrl,
+        body,
+        headers: {
+          "Content-Type": "application/json"
+        }
       };
-    }, "https://c.y.qq.com/"));
-    return (result.data?.song?.list ?? result.data?.songlist ?? []).map(mapSong);
+    }, "https://y.qq.com/n/ryqq/search", cacheTtlMs));
+    const request = result.req_1;
+    if (result.code !== 0 || !request || request.code !== 0 || !request.data || request.data.code !== 0) {
+      throw new Error("QQ Music rejected the search request");
+    }
+    return (request.data.body?.song?.list ?? []).map(mapSong);
   }
 
   return {
@@ -174,7 +205,8 @@ export function createQqMusicAdapter(options: {
     },
 
     async testConnection() {
-      await search("test");
+      const results = await search("周杰伦", 0);
+      if (results.length === 0) throw new Error("QQ Music returned no connectivity-check results");
     }
   };
 }

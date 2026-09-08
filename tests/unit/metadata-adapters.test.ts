@@ -286,14 +286,18 @@ describe("metadata adapters", () => {
         source: "netease",
         title: "Mystery of Love",
         artist: "Sufjan Stevens",
+        albumArtist: "Various Artists",
         album: "Call Me by Your Name",
+        trackNumber: 4,
+        discNumber: 2,
+        date: "2021",
         totalDurationMs: 248000,
         coverUrl: "https://p1.music.126.net/example/109951.jpg"
       })
     ]);
     cookie = "MUSIC_U=rotated-secret; __csrf=csrf-value";
     const details = await adapter.getDetails("1859245776");
-    expect(details).toMatchObject({ title: "Mystery of Love", totalDurationMs: 248000 });
+    expect(details).toMatchObject({ title: "Mystery of Love", totalDurationMs: 248000, albumArtist: "Various Artists", trackNumber: 4, discNumber: 2, date: "2021", genre: "Soundtrack", composer: "Sufjan Stevens" });
     expect(queued.requests[1].headers.Cookie).toBe("MUSIC_U=rotated-secret; __csrf=csrf-value");
     expect(JSON.stringify(details)).not.toContain("secret");
 
@@ -378,7 +382,7 @@ describe("metadata adapters", () => {
       "uin=1; qm_keyst=secret-1",
       "uin=2; qm_keyst=secret-2"
     ]);
-    expect(qqRequests.map((request) => new URL(request.url).searchParams.get("loginUin"))).toEqual(["1", "2"]);
+    expect(qqRequests.map((request) => (JSON.parse(request.body as string) as { comm: { uin: string } }).comm.uin)).toEqual(["1", "2"]);
   });
 
   it("maps QQ search/detail fixtures and derives the upstream album-cover URL", async () => {
@@ -398,31 +402,63 @@ describe("metadata adapters", () => {
       source: "qq",
       title: "Mojito",
       artist: "Jay Chou",
+      trackNumber: 1,
+      trackTotal: 1,
+      discNumber: 1,
+      date: "2020-06-12",
       album: "Mojito",
       totalDurationMs: 185000,
       coverUrl: "https://y.gtimg.cn/music/photo_new/T002R500x500M0000016l2F430zMux.jpg?max_age=2592000"
     });
-    await expect(adapter.getDetails(candidate.id)).resolves.toMatchObject({ id: candidate.id, artist: "Jay Chou", album: "Mojito" });
+    await expect(adapter.getDetails(candidate.id)).resolves.toMatchObject({ id: candidate.id, artist: "Jay Chou", albumArtist: "Jay Chou", album: "Mojito", trackNumber: 1, trackTotal: 1, discNumber: 1, date: "2020-06-12", genre: "Pop", composer: "Jay Chou" });
     await expect(adapter.getCover(candidate)).resolves.toEqual({ mimeType: "image/jpeg", data: "AQID" });
     expect(queued.requests.slice(0, 2).every((request) => request.headers.Cookie === "uin=12345; qm_keyst=qq-secret")).toBe(true);
     expect(queued.requests[2].headers.Cookie).toBeUndefined();
     expect(queued.requests[2].maxResponseBytes).toBe(20 * 1024 * 1024);
 
-    const expected = JSON.parse(await fixture("qq-request-shapes.json")) as Record<"search" | "detail", {
-      host: string;
-      referer: string;
-      contentType?: string;
-      params: Record<string, string>;
-    }>;
+    const expected = JSON.parse(await fixture("qq-request-shapes.json")) as {
+      search: {
+        host: string;
+        referer: string;
+        contentType: string;
+        body: Record<string, unknown>;
+      };
+      detail: {
+        host: string;
+        referer: string;
+        contentType: string;
+        params: Record<string, string>;
+      };
+    };
     const searchUrl = new URL(queued.requests[0].url);
     const detailUrl = new URL(queued.requests[1].url);
-    expect(Object.fromEntries(searchUrl.searchParams)).toEqual(expected.search.params);
-    expect(queued.requests[0]).toMatchObject({ referrer: expected.search.referer });
+    expect(searchUrl.hostname).toBe(expected.search.host);
+    expect(queued.requests[0]).toMatchObject({ method: "POST", referrer: expected.search.referer });
+    expect(queued.requests[0].headers).toMatchObject({ "Content-Type": expected.search.contentType });
+    expect(queued.requests[0].headers).not.toHaveProperty("Origin");
+    expect(JSON.parse(queued.requests[0].body as string)).toEqual(expected.search.body);
     expect(queued.requests[0].headers).not.toHaveProperty("Host");
     expect(Object.fromEntries(Object.keys(expected.detail.params).map((key) => [key, detailUrl.searchParams.get(key)]))).toEqual(expected.detail.params);
     expect(queued.requests[1]).toMatchObject({ referrer: expected.detail.referer });
     expect(queued.requests[1].headers).toMatchObject({ "Content-Type": expected.detail.contentType });
     expect(queued.requests[1].headers).not.toHaveProperty("Host");
+  });
+
+  it("rejects QQ Music business errors and empty connectivity-check responses", async () => {
+    const rejected = createQqMusicAdapter({
+      http: clientFor(queueTransport([response(JSON.stringify({ code: 0, req_1: { code: 2001 } }))]).transport),
+      cookieStore: { get: async () => "uin=12345; qm_keyst=qq-secret" }
+    });
+    await expect(rejected.search("Mojito")).rejects.toThrow("QQ Music rejected the search request");
+
+    const empty = createQqMusicAdapter({
+      http: clientFor(queueTransport([response(JSON.stringify({
+        code: 0,
+        req_1: { code: 0, data: { code: 0, body: { song: { list: [] } } } }
+      }))]).transport),
+      cookieStore: { get: async () => "uin=12345; qm_keyst=qq-secret" }
+    });
+    await expect(empty.testConnection?.()).rejects.toThrow("QQ Music returned no connectivity-check results");
   });
 
   it("uses a finite auth-sensitive session cache for QQ searches", async () => {
@@ -882,6 +918,21 @@ describe("candidate scoring and IPC", () => {
     );
     expect(structural).toMatchObject({ confidence: "high", score: 100 });
     expect(structural.evidence).toEqual(expect.arrayContaining(["Disc ID matched", "TOC matched", "CTDB verified the pressing"]));
+  });
+
+  it("treats duration as the primary single-track ranking signal", () => {
+    const sameDuration = scoreCandidate(
+      { title: "Local edit", artist: "Artist", durationMs: 240_000 },
+      { id: "same", source: "qq", title: "Different spelling", artist: "Artist", totalDurationMs: 241_000, confidence: "low" }
+    );
+    const wrongDuration = scoreCandidate(
+      { title: "Local edit", artist: "Artist", durationMs: 240_000 },
+      { id: "wrong", source: "qq", title: "Local edit", artist: "Artist", totalDurationMs: 280_000, confidence: "low" }
+    );
+
+    expect(sameDuration.score).toBeGreaterThan(wrongDuration.score);
+    expect(sameDuration.evidence).toContain("Total duration matched");
+    expect(wrongDuration.evidence).toContain("Total duration differed");
   });
 
   it("delegates metadata search and Cookie connectivity checks without returning a Cookie", async () => {

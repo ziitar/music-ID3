@@ -64,10 +64,15 @@ export function scoreCandidate(local: LocalMatchContext, candidate: MetadataCand
     structuralSignals += 1;
     evidence.push("Track count matched");
   }
-  if (closeDuration(local.durationMs, candidate.totalDurationMs)) {
-    score += 10;
-    structuralSignals += 1;
-    evidence.push("Total duration matched");
+  if (local.durationMs !== undefined && candidate.totalDurationMs !== undefined) {
+    if (closeDuration(local.durationMs, candidate.totalDurationMs)) {
+      score += 40;
+      structuralSignals += 1;
+      evidence.push("Total duration matched");
+    } else {
+      score -= 25;
+      evidence.push("Total duration differed");
+    }
   }
   const candidateDurations = candidate.tracks?.map((track) => track.durationMs);
   if (
@@ -95,7 +100,7 @@ export function scoreCandidate(local: LocalMatchContext, candidate: MetadataCand
     evidence.push("CTDB verified the pressing");
   }
 
-  score = Math.min(100, score);
+  score = Math.max(0, Math.min(100, score));
   const confidence = structuralSignals >= 3 && score >= 80
     ? "high"
     : structuralSignals >= 1 && score >= 50
