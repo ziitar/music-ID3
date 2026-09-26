@@ -191,6 +191,15 @@ function mapMetadata(handle: TagLibHandle, format: string): AudioMetadata {
 }
 
 function validatePatch(patch: MetadataPatch): WriteResult | undefined {
+  for (const field of patch.selectedFields) {
+    const value = patch.fields[field];
+    if (value === undefined || field === "cover" || (Array.isArray(value) && value.length === 0)) continue;
+    if (["trackNumber", "trackTotal", "discNumber", "discTotal"].includes(field)) {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return { ok: false, error: `Invalid ${field} value`, unsupportedFields: [field] };
+    } else if (typeof value !== "string") {
+      return { ok: false, error: `Invalid ${field} value`, unsupportedFields: [field] };
+    }
+  }
   if (patch.selectedFields.includes("date") && patch.fields.date !== undefined && !/^\d{4}$/.test(patch.fields.date)) {
     return { ok: false, error: "Date writes require an exact four-digit year", unsupportedFields: ["date"] };
   }

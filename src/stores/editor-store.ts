@@ -46,10 +46,13 @@ function localMatchContext(item: LibraryItem | undefined): MetadataSearchContext
 }
 
 function candidateFieldValue(candidate: MetadataCandidate, field: string): unknown {
-  if (field === "date" && candidate.date) {
+  if (field === "date" && typeof candidate.date === "string") {
     return candidate.date.match(/^\d{4}/)?.[0] ?? candidate.date;
   }
-  return field === "title" ? candidate.title : candidate[field as keyof MetadataCandidate];
+  const value = field === "title" ? candidate.title : candidate[field as keyof MetadataCandidate];
+  if (["trackNumber", "trackTotal", "discNumber", "discTotal"].includes(field)) return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (field === "cover") return value;
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 export function createEditorStore(bridge?: MusicId3Api) {

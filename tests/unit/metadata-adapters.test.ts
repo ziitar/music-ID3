@@ -444,6 +444,14 @@ describe("metadata adapters", () => {
     expect(queued.requests[1].headers).not.toHaveProperty("Host");
   });
 
+  it("omits QQ numeric genre identifiers that cannot be written as text", async () => {
+    const payload = JSON.parse(await fixture("qq-detail.json")) as { songinfo: { data: { track_info: { genre: number | string } } } };
+    payload.songinfo.data.track_info.genre = 12;
+    const queued = queueTransport([response(JSON.stringify(payload))]);
+    const adapter = createQqMusicAdapter({ http: clientFor(queued.transport), cookieStore: { get: async () => undefined } });
+    expect((await adapter.getDetails("0039MnYb0qxYhV")).genre).toBeUndefined();
+  });
+
   it("rejects QQ Music business errors and empty connectivity-check responses", async () => {
     const rejected = createQqMusicAdapter({
       http: clientFor(queueTransport([response(JSON.stringify({ code: 0, req_1: { code: 2001 } }))]).transport),

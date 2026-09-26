@@ -37,6 +37,7 @@ test("catches audio metadata writes that bypass per-field preview and confirmati
 
 test("catches provider candidates being written without a second explicit confirmation", async ({ page }) => {
   await openEditable(page);
+  await page.getByLabel("provider", { exact: true }).selectOption("musicbrainz");
   await page.getByLabel("candidate query").fill("Miles Davis Kind of Blue");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const candidate = page.getByTestId("metadata-candidate").filter({ hasText: "Kind of Blue" });
@@ -65,6 +66,7 @@ test("catches provider candidates being written without a second explicit confir
 
 test("catches provider failures leaking secrets or blocking later local writes", async ({ page }) => {
   await openEditable(page);
+  await page.getByLabel("provider", { exact: true }).selectOption("musicbrainz");
   await page.getByLabel("candidate query").fill("offline");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page.getByRole("alert")).toHaveText("Metadata search failed");

@@ -1,19 +1,23 @@
 import { expect, test } from "./electron-fixture";
 import type { Page } from "playwright/test";
 
-async function scan(page: Page) {
+async function scan(page: Page, expand = true) {
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("directory-root")).not.toHaveText("No folder selected");
+  await expect(page.getByRole("button", { name: "Expand directories" })).toBeVisible();
+  if (expand) {
+    await page.getByRole("button", { name: "Expand directories" }).click();
+    await expect(page.getByTestId("directory-root")).not.toHaveText("No folder selected");
+  }
 }
 
 test("catches progressive scan callbacks being replaced by final-summary replay", async ({ page }) => {
-  await scan(page);
+  await scan(page, false);
 
-  await expect(page.getByTestId("scan-progress")).toBeVisible();
+  await expect(page.locator(".directory-scan-indicator")).toBeVisible();
   await expect(page.getByTestId("library-count")).toHaveText("1 items");
   await expect(page.getByTestId("library-row")).toHaveCount(1);
   await expect(page.getByTestId("library-row").first()).toContainText("missing-file.cue");
-  await expect(page.getByTestId("scan-progress")).toBeVisible();
+  await expect(page.locator(".directory-scan-indicator")).toBeVisible();
 });
 
 test("catches a supported audio format or mixed-case extension disappearing from scan results", async ({ page, fixtureRoot }) => {

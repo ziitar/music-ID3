@@ -19,7 +19,7 @@ type QqSong = {
   index_cd?: number;
   songnum?: number;
   time_public?: string;
-  genre?: string;
+  genre?: unknown;
   composer?: Array<{ name?: string }> | string;
   lyric?: string;
   desc?: string;
@@ -97,7 +97,7 @@ function mapSong(song: QqSong): MetadataCandidate {
     trackTotal: song.songnum,
     discNumber: song.index_cd,
     date: song.time_public,
-    genre: song.genre,
+    genre: typeof song.genre === "string" ? song.genre.trim() || undefined : undefined,
     composer: composer || undefined,
     lyrics: song.lyric,
     comment: song.desc,

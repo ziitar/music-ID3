@@ -27,8 +27,7 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
   const [validatedRaw, setValidatedRaw] = useState<string | undefined>(item.parseError ? undefined : item.rawText);
   const rawRef = useRef(item.rawText);
   const previewGeneration = useRef(0);
-  const editorState = useEditorStore((state) => state);
-  const saveError = editorState.error;
+  const editorGeneration = useEditorStore((state) => state.generation);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -45,7 +44,7 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
     setValidatedRaw(item.parseError ? undefined : item.rawText);
     setConfirm(undefined);
     setMode("structured");
-  }, [item.path, item.rawText, item.parsed, item.encoding, item.parseError, editorState.generation]);
+  }, [item.path, item.rawText, item.parsed, item.encoding, item.parseError, editorGeneration]);
 
   const previewRaw = async () => {
     const requestedRaw = rawRef.current;
@@ -138,7 +137,6 @@ export function CueEditor({ item, source }: { item: Extract<LibraryItem, { kind:
       {provenance.inferred && <p className="warning-text">{t("inferredCandidate")}</p>}
     </div>}
     {validationError && <p className="error-text" role="alert">{translateMessage(validationError)}</p>}
-    {saveError && <p className="error-text" role="alert">{translateMessage(saveError)}</p>}
     {item.missingReferencedFiles.length > 0 && <p className="warning-text">{t("missingReferences")}: {item.missingReferencedFiles.join(", ")}</p>}
     <div className="mode-tabs"><button aria-pressed={mode === "structured"} onClick={() => setMode("structured")}>{t("structured")}</button><button aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>{t("raw")}</button></div>
     <label>{t("encoding")}<select aria-label={aria("encoding", t("encoding"))} value={encoding} onChange={(event) => setEncoding(event.target.value as CueEncoding)}><option value="utf8">UTF-8</option><option value="utf8-bom">UTF-8 BOM</option><option value="gb18030">GB18030</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift-jis">Shift-JIS</option></select></label>

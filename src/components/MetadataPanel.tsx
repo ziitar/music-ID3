@@ -20,9 +20,9 @@ function valueText(value: unknown): string {
 }
 
 export function MetadataPanel() {
-  const { locale, t, translateMessage } = useI18n();
+  const { locale, t } = useI18n();
   const state = useEditorStore((value) => value);
-  const { item, draft, selectedFields, diff, cueDraft, error } = state;
+  const { item, draft, selectedFields, diff, cueDraft } = state;
   const [confirm, setConfirm] = useState<PendingWrite>();
   const [mode, setMode] = useState<"common" | "raw">("common");
   const [coverConfirm, setCoverConfirm] = useState<CoverClearConfirmation>();
@@ -111,7 +111,7 @@ export function MetadataPanel() {
   const coverConfirmationCurrent = Boolean(coverConfirm && isCoverConfirmationCurrent(coverConfirm));
 
   return <aside className="pane details-pane" aria-label={t("details")}>
-    <div className="details-header"><div><span>{t("nowEditing")}</span><h2>{String(draft.title || item.fileName)}</h2><strong>{String(draft.artist || t("unknownArtist"))}</strong><p data-testid="details-file-name">{item.path}</p></div><div className="file-facts"><span>{item.extension.slice(1).toUpperCase()}</span><span>{Math.floor(item.durationMs / 60000)}:{String(Math.round(item.durationMs / 1000) % 60).padStart(2, "0")}</span><span>{(item.sizeBytes / 1_000_000).toFixed(1)} MB</span></div></div>{error && <p className="error-text" role="alert">{translateMessage(error)}</p>}
+    <div className="details-header"><div><span>{t("nowEditing")}</span><h2>{String(draft.title || item.fileName)}</h2><strong>{String(draft.artist || t("unknownArtist"))}</strong><p data-testid="details-file-name">{item.path}</p></div><div className="file-facts"><span>{item.extension.slice(1).toUpperCase()}</span><span>{Math.floor(item.durationMs / 60000)}:{String(Math.round(item.durationMs / 1000) % 60).padStart(2, "0")}</span><span>{(item.sizeBytes / 1_000_000).toFixed(1)} MB</span></div></div>
     {suspected && <div className="guidance"><p>{t("suspectedCue")}</p><button onClick={() => window.dispatchEvent(new CustomEvent("music-id3:override", { detail: item.path }))}>{t("normalAudioEditing")}</button></div>}
     <MetadataCandidates />
     {candidateCueItem && <CueEditor key="candidate-cue" item={candidateCueItem} source={state.candidateSource} />}

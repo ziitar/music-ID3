@@ -90,9 +90,16 @@ describe("library editing workflow", () => {
     expect(screen.getByRole("complementary", { name: /details/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /scan/i }));
     await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledWith("D:/音乐", expect.any(String)));
+    expect(screen.getByRole("button", { name: /expand directories/i })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("complementary", { name: /directories/i })).toHaveClass("collapsed");
+    fireEvent.click(screen.getByRole("button", { name: /expand directories/i }));
+    expect(screen.getByRole("button", { name: /collapse directories/i })).toHaveAttribute("aria-expanded", "true");
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem() });
     expect(await screen.findByText("track.flac")).toBeInTheDocument();
     expect(screen.getByTestId("library-row")).toHaveTextContent("suspected");
+    fireEvent.click(screen.getByRole("button", { name: /choose folder/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: /expand directories/i })).toBeInTheDocument();
   });
 
   it("allows directory organization only for complete standalone audio metadata", async () => {
@@ -283,7 +290,7 @@ describe("library editing workflow", () => {
     const cue: LibraryItem = { kind: "cue", path: "D:/音乐/album.cue", encoding: "utf8", rawText: "", parsed: { title: "Album", remarks: [], files: [], tracks: [], unknownLines: [] }, referencedFiles: [], missingReferencedFiles: [] };
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: cue }); fireEvent.click(await screen.findByText("album.cue")); fireEvent.click(screen.getByRole("button", { name: /save cue/i })); fireEvent.click(await screen.findByRole("button", { name: /confirm cue save/i }));
 
-    expect(await screen.findByText("Unable to refresh CUE")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to refresh CUE");
     expect(screen.queryByText(/private read failure/i)).not.toBeInTheDocument();
     expect(editorStore.getState().item?.path).toBe(cue.path);
   });
@@ -402,7 +409,7 @@ describe("library editing workflow", () => {
     expect(comparison).toHaveTextContent("Cloud album artist");
     expect(comparison).toHaveTextContent("Not provided");
 
-    fireEvent.click(within(comparison).getByRole("button", { name: /transfer album artist/i }));
+    expect(within(comparison).getByRole("button", { name: /transfer album artist/i })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
     expect(await screen.findByRole("dialog")).toHaveTextContent("Cloud album artist");
   });
@@ -415,7 +422,7 @@ describe("library editing workflow", () => {
     const comparison = await selectFirstCandidate();
     await waitFor(() => expect(within(comparison).getByRole("button", { name: /transfer cover/i })).toBeEnabled());
     expect(within(comparison).getByRole("button", { name: /transfer date/i })).toBeEnabled();
-    fireEvent.click(within(comparison).getByRole("button", { name: /transfer cover/i }));
+    expect(within(comparison).getByRole("button", { name: /transfer cover/i })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
     expect(window.musicId3.getMetadataCandidate).toHaveBeenCalledTimes(1);
     fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
@@ -607,16 +614,15 @@ describe("library editing workflow", () => {
 
   it("disables normal-audio candidate apply when no selected field is available", async () => {
     vi.mocked(window.musicId3.searchMetadata).mockResolvedValueOnce([{ id: "with-cover", source: "musicbrainz", title: "With cover", confidence: "high" }]).mockResolvedValueOnce([{ id: "without-cover", source: "musicbrainz", title: "Without cover", confidence: "high" }]);
-    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "with-cover", source: "musicbrainz", title: "With cover", cover: { mimeType: "image/jpeg", data: "AQID" }, confidence: "high" });
+    vi.mocked(window.musicId3.getMetadataCandidate).mockImplementation(async (_source, id) => ({ id, source: "musicbrainz", title: id === "with-cover" ? "With cover" : "Without cover", ...(id === "with-cover" ? { cover: { mimeType: "image/jpeg", data: "AQID" } } : {}), confidence: "high" }));
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled()); progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) }); fireEvent.click(await screen.findByText("track.flac")); fireEvent.change(screen.getByLabelText(/candidate query/i), { target: { value: "candidate" } }); fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
     await screen.findByText("With cover");
     const firstComparison = await selectFirstCandidate();
     await waitFor(() => expect(within(firstComparison).getByRole("button", { name: /transfer cover/i })).toBeEnabled());
-    fireEvent.click(within(firstComparison).getByRole("button", { name: /transfer title/i }));
-    fireEvent.click(within(firstComparison).getByRole("button", { name: /transfer cover/i }));
     fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
     await screen.findByText("Without cover");
     const secondComparison = await selectFirstCandidate();
+    fireEvent.click(within(secondComparison).getByRole("button", { name: /transfer title/i }));
     expect(within(secondComparison).getByRole("button", { name: /overwrite selected fields/i })).toBeDisabled();
   });
 
@@ -784,12 +790,51 @@ describe("library editing workflow", () => {
     expect(screen.getByLabelText(/candidate query/i)).toHaveValue("Album Artist Album");
   });
 
+  it("uses the filename when ID3 search fields are empty and keeps the last successful provider across tracks", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockImplementation(async (source) => [{ id: `${source}-1`, source, title: "Found", confidence: "high" }]);
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/First Song.flac", fileName: "First Song.flac", wholeTrackStatus: "normal", metadata: { common: {}, raw: {}, durationMs: 215_000 } }) });
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/Second Song.mp3", fileName: "Second Song.mp3", extension: ".mp3", wholeTrackStatus: "normal", metadata: { common: {}, raw: {}, durationMs: 215_000 } }) });
+    fireEvent.click(await screen.findByText("First Song.flac"));
+    expect(screen.getByLabelText(/candidate query/i)).toHaveValue("First Song");
+    expect(screen.getByLabelText("provider")).toHaveValue("netease");
+    fireEvent.change(screen.getByLabelText("provider"), { target: { value: "qq" } });
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    await waitFor(() => expect(window.musicId3.searchMetadata).toHaveBeenCalledWith("qq", "First Song", expect.anything()));
+    await screen.findByTestId("metadata-candidate");
+    fireEvent.click(screen.getByText("Second Song.mp3"));
+    expect(screen.getByLabelText(/candidate query/i)).toHaveValue("Second Song");
+    expect(screen.getByLabelText("provider")).toHaveValue("qq");
+  });
+
+  it("auto selects populated candidate fields and surfaces write errors in a floating alert", async () => {
+    vi.mocked(window.musicId3.searchMetadata).mockResolvedValue([{ id: "qq-1", source: "qq", title: "Cloud title", artist: "Cloud artist", genre: 12 as unknown as string, confidence: "high" }]);
+    vi.mocked(window.musicId3.getMetadataCandidate).mockResolvedValue({ id: "qq-1", source: "qq", title: "Cloud title", artist: "Cloud artist", genre: 12 as unknown as string, confidence: "high" });
+    vi.mocked(window.musicId3.writeAudio).mockResolvedValue({ ok: false, error: "Write rejected" });
+    render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i }));
+    await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
+    progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ wholeTrackStatus: "normal" }) });
+    fireEvent.click(await screen.findByText("track.flac"));
+    fireEvent.click(screen.getByRole("button", { name: /^search$/i }));
+    const comparison = await selectFirstCandidate();
+    expect(within(comparison).getByRole("button", { name: /transfer title/i })).toHaveAttribute("aria-pressed", "true");
+    expect(within(comparison).getByRole("button", { name: /transfer artist/i })).toHaveAttribute("aria-pressed", "true");
+    expect(within(comparison).getByRole("button", { name: /transfer genre/i })).toBeDisabled();
+    fireEvent.click(within(comparison).getByRole("button", { name: /overwrite selected fields/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm candidate write/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Write rejected");
+    expect(screen.getByRole("button", { name: /dismiss error/i })).toBeInTheDocument();
+    expect(window.musicId3.writeAudio).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ selectedFields: expect.not.arrayContaining(["genre"]) }));
+  });
+
   it("navigates a recursive directory hierarchy and filters the current library view", async () => {
     render(<App />); fireEvent.click(screen.getByRole("button", { name: /scan/i })); await waitFor(() => expect(window.musicId3.scanDirectory).toHaveBeenCalled());
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 1, item: audioItem({ path: "D:/音乐/root.mp3", fileName: "root.mp3", extension: ".mp3", wholeTrackStatus: "normal" }) });
     progressListener?.({ scanId: "scan-1", phase: "scanning", scannedCount: 2, item: audioItem({ path: "D:/音乐/现场/live.flac", fileName: "live.flac", wholeTrackStatus: "normal" }) });
     await screen.findByText("live.flac");
 
+    fireEvent.click(screen.getByRole("button", { name: /expand directories/i }));
     fireEvent.click(screen.getByRole("button", { name: "现场" }));
     expect(screen.queryByText("root.mp3")).not.toBeInTheDocument();
     expect(screen.getByText("live.flac")).toBeInTheDocument();
@@ -910,7 +955,7 @@ describe("library editing workflow", () => {
 
   it("routes Choose folder rejection through the safe library-store error state", async () => {
     vi.mocked(window.musicId3.selectDirectory).mockRejectedValue(new Error("private picker failure"));
-    render(<App />); fireEvent.click(screen.getByRole("button", { name: /choose folder/i }));
+    render(<App />); if (screen.queryByRole("button", { name: /expand directories/i })) fireEvent.click(screen.getByRole("button", { name: /expand directories/i })); fireEvent.click(screen.getByRole("button", { name: /choose folder/i }));
     expect(await screen.findByText("Unable to select a folder")).toBeInTheDocument();
     expect(screen.queryByText(/private picker failure/i)).not.toBeInTheDocument();
   });

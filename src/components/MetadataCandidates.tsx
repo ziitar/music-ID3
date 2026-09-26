@@ -19,9 +19,10 @@ function defaultQuery(state: ReturnType<typeof editorStore.getState>): string {
   if (item.kind === "cue") return [item.parsed.performer, item.parsed.title].filter(Boolean).join(" ");
   const common = item.metadata.common;
   const albumFlow = item.wholeTrackStatus === "suspected";
-  return albumFlow
+  const metadataQuery = albumFlow
     ? [common.albumArtist ?? common.artist, common.album ?? common.title].filter(Boolean).join(" ")
     : [common.artist ?? common.albumArtist, common.title ?? common.album].filter(Boolean).join(" ");
+  return metadataQuery.trim() || item.fileName.replace(/\.[^.]+$/, "");
 }
 
 function candidateKey(candidate: MetadataCandidate): string {
@@ -47,8 +48,19 @@ function durationMatch(localMs: number | undefined, cloudMs: number | undefined)
 
 function candidateValue(candidate: MetadataCandidate, field: CandidateField): unknown {
   if (field === "title") return candidate.title;
-  if (field === "date" && candidate.date) return candidate.date.match(/^\d{4}/)?.[0] ?? candidate.date;
-  return candidate[field];
+  if (field === "date" && typeof candidate.date === "string") return candidate.date.match(/^\d{4}/)?.[0] ?? candidate.date;
+  const value = candidate[field];
+  if (["trackNumber", "trackTotal", "discNumber", "discTotal"].includes(field)) return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  if (field === "cover") return value;
+  return typeof value === "string" ? value : undefined;
+}
+
+function hasCandidateValue(value: unknown): boolean {
+  return value !== undefined && value !== null && (typeof value !== "string" || value.trim() !== "");
+}
+
+function defaultSelectedFields(candidate: MetadataCandidate): CandidateField[] {
+  return candidateFields.filter((field) => hasCandidateValue(candidateValue(candidate, field)));
 }
 
 function displayValue(value: unknown, missing: string, coverLabel: string): string {
@@ -66,8 +78,9 @@ function Cover({ cover, alt, compact = false }: { cover?: CoverArt; alt: string;
 export function MetadataCandidates() {
   const { locale, t, translateMessage } = useI18n();
   const [query, setQuery] = useState("");
-  const [source, setSource] = useState<MetadataSource>("musicbrainz");
-  const [selected, setSelected] = useState<CandidateField[]>(["title", "artist", "album"]);
+  const [source, setSource] = useState<MetadataSource>("netease");
+  const lastSuccessfulSource = useRef<MetadataSource>("netease");
+  const [selected, setSelected] = useState<CandidateField[]>([]);
   const [focusedKey, setFocusedKey] = useState<string>();
   const [loadedKeys, setLoadedKeys] = useState<Set<string>>(() => new Set());
   const [pending, setPending] = useState<PendingCandidate>();
@@ -89,9 +102,9 @@ export function MetadataCandidates() {
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    setSource("musicbrainz");
+    setSource(cueFlow ? "musicbrainz" : lastSuccessfulSource.current);
     setQuery(defaultQuery(editorStore.getState()));
-    setSelected(["title", "artist", "album"]);
+    setSelected([]);
     setFocusedKey(undefined);
     setLoadedKeys(new Set());
     setPending(undefined);
@@ -105,20 +118,24 @@ export function MetadataCandidates() {
   }, [state.candidates, focusedKey]);
 
   const toggleField = (field: CandidateField) => {
-    if (!focused || candidateValue(focused, field) === undefined) return;
+    if (!focused || !hasCandidateValue(candidateValue(focused, field))) return;
     setSelected((current) => current.includes(field) ? current.filter((entry) => entry !== field) : [...current, field]);
   };
   const loadDetails = async (candidate: MetadataCandidate) => {
     setFocusedKey(candidateKey(candidate));
     const result = await editorStore.loadCandidateDetails(candidate);
-    if (result && mounted.current) setLoadedKeys((current) => new Set(current).add(candidateKey(result)));
+    if (result && mounted.current) {
+      setLoadedKeys((current) => new Set(current).add(candidateKey(result)));
+      setSelected(defaultSelectedFields(result));
+    }
   };
   const searchCandidates = async () => {
     setFocusedKey(undefined);
     setLoadedKeys(new Set());
     setPending(undefined);
     setActiveIndex(0);
-    await editorStore.searchCandidates(source, query);
+    const results = await editorStore.searchCandidates(source, query);
+    if (results.length > 0 && mounted.current) lastSuccessfulSource.current = source;
   };
   const apply = async (candidate: MetadataCandidate) => {
     setFocusedKey(candidateKey(candidate));
@@ -145,6 +162,7 @@ export function MetadataCandidates() {
     if (!candidate) return;
     setActiveIndex(bounded);
     setFocusedKey(candidateKey(candidate));
+    setSelected(defaultSelectedFields(candidate));
     setDragX(0);
     if (load && !loadedKeys.has(candidateKey(candidate))) void loadDetails(candidate);
   };
@@ -168,7 +186,7 @@ export function MetadataCandidates() {
   };
   const pendingCurrent = Boolean(pending && editorStore.isAudioWriteConfirmationCurrent(pending.confirmation));
   const confidenceLabel = (confidence: MetadataCandidate["confidence"]) => t(confidence === "high" ? "confidenceHigh" : confidence === "medium" ? "confidenceMedium" : "confidenceLow");
-  const availableSelected = (candidate: MetadataCandidate) => selected.filter((field) => candidateValue(candidate, field) !== undefined);
+  const availableSelected = (candidate: MetadataCandidate) => selected.filter((field) => hasCandidateValue(candidateValue(candidate, field)));
   const durationState = focused ? durationMatch(localDuration, focused.totalDurationMs) : { kind: "unknown" as const };
   const localItem = state.item?.kind === "audio" ? state.item : undefined;
 
@@ -216,7 +234,7 @@ export function MetadataCandidates() {
         <div className="comparison-fields">
           {candidateFields.map((field) => {
             const remote = candidateValue(focused, field);
-            const available = remote !== undefined;
+            const available = hasCandidateValue(remote);
             const chosen = selected.includes(field) && available;
             const different = displayValue(localFields[field], "", "") !== displayValue(remote, "", "");
             return <div className={`comparison-row ${chosen ? "selected" : ""} ${different ? "different" : ""}`} key={field}>

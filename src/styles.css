@@ -206,6 +206,15 @@ svg {
   display: grid;
   grid-template-columns: 210px minmax(310px, 350px) minmax(600px, 1fr);
   overflow: hidden;
+  transition: grid-template-columns 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace { transition: none; }
+}
+
+.workspace.directories-collapsed {
+  grid-template-columns: 52px minmax(310px, 350px) minmax(0, 1fr);
 }
 
 .pane {
@@ -224,6 +233,35 @@ svg {
 
 .directory-pane {
   padding: 16px 12px;
+}
+
+.directory-pane.collapsed {
+  padding: 16px 6px;
+  overflow: hidden;
+}
+
+.directory-pane.collapsed .pane-toolbar {
+  flex-direction: column;
+  gap: 12px;
+}
+
+.directory-pane.collapsed .pane-toolbar h2 {
+  display: none;
+}
+
+.directory-toggle {
+  flex: 0 0 32px;
+}
+
+.directory-scan-indicator,
+.directory-error-indicator {
+  width: 32px;
+  height: 32px;
+  margin-top: 8px;
+}
+
+.directory-error-indicator {
+  color: #ff8272;
 }
 
 .library-pane {
@@ -1426,6 +1464,40 @@ svg {
 }
 
 .error-text { color: #ff8272; }
+.editor-error-toast {
+  position: fixed;
+  z-index: 50;
+  top: 76px;
+  right: 22px;
+  width: min(440px, calc(100vw - 44px));
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid #e96d64;
+  border-radius: 9px;
+  background: #351a1b;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
+  color: #ffe5df;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.editor-error-toast > svg {
+  flex: 0 0 18px;
+  color: #ff8272;
+}
+
+.editor-error-toast > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.editor-error-toast .icon-button {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+}
 .warning-text { color: #ffc36d; }
 .status-text { color: var(--acid); }
 .empty-state { color: var(--muted); font-size: 11px; }
@@ -1760,6 +1832,10 @@ svg {
     grid-template-columns: 184px 300px minmax(540px, 1fr);
   }
 
+  .workspace.directories-collapsed {
+    grid-template-columns: 52px 300px minmax(0, 1fr);
+  }
+
   .metadata-stage {
     grid-template-columns: 220px minmax(320px, 1fr);
     gap: 14px;
@@ -1792,6 +1868,10 @@ svg {
 
 @media (max-width: 1020px) {
   .workspace {
+    grid-template-columns: 280px minmax(560px, 1fr);
+  }
+
+  .workspace.directories-collapsed {
     grid-template-columns: 280px minmax(560px, 1fr);
   }
 
